@@ -168,7 +168,7 @@ function measureHostZone() {
     reset = ["tzutil", "/s", before.stdout.trim()];
   } else if (process.platform === "darwin" && typeof before === "string" && before.includes("/zoneinfo/")) {
     set = ["sudo", "-n", "systemsetup", "-settimezone", "Asia/Tokyo"];
-    reset = ["sudo", "-n", "systemsetup", "-settimezone", before.split("/zoneinfo/")[1]];
+    reset = ["sudo", "-n", "ln", "-sfn", before, "/etc/localtime"];
   } else if (process.platform === "linux" && typeof before === "string") {
     set = ["sudo", "-n", "ln", "-sfn", "/usr/share/zoneinfo/Asia/Tokyo", "/etc/localtime"];
     reset = ["sudo", "-n", "ln", "-sfn", before, "/etc/localtime"];
@@ -200,9 +200,13 @@ function measureHostZone() {
 function traceConfigFiles() {
   if (process.platform !== "linux" || builds.probe.exit !== 0 || builds.control.exit !== 0) return null;
   const strace = join(output, "strace", "usr", "bin", "strace");
-  const files = ["package.json", "bunfig.toml", ".env"].flatMap((file) => ["-P", join(planted, file)]);
-  const trace = (name: "probe" | "control") =>
-    run([strace, "-qq", "-f", "-e", "trace=%file", ...files, binary(name), "environment"], planted);
+  const trace = (name: "probe" | "control") => {
+    const result = run([strace, "-qq", "-f", "-yy", "-e", "trace=%file", binary(name), "environment"], planted);
+    const matched = result.stderr.split("\n").filter((line) =>
+      /"(?:[^"]*\/)?(?:package\.json|bunfig\.toml|\.env)"/.test(line)
+    );
+    return { ...result, stderr: result.exit === 0 ? matched.join("\n") : result.stderr };
+  };
   return { version: run([strace, "--version"], source), flagged: trace("probe"), control: trace("control") };
 }
 
