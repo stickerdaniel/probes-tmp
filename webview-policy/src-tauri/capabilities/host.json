@@ -1,0 +1,13 @@
+{
+  "identifier": "host",
+  "webviews": ["main"],
+  "permissions": [
+    "core:default",
+    "allow-probe-mark",
+    "allow-probe-config",
+    "allow-probe-event",
+    "allow-probe-heartbeat",
+    "allow-probe-report",
+    "probe:default"
+  ]
+}

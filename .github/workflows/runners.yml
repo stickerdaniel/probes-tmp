@@ -1,18 +1,93 @@
 name: runners
 on:
   workflow_dispatch:
+    inputs:
+      oses:
+        description: JSON list of runner images
+        required: false
+        default: '["ubuntu-24.04", "windows-2025", "macos-15"]'
+      variants:
+        description: Space separated variants, empty for all
+        required: false
+        default: ""
 permissions:
   contents: read
 jobs:
-  info:
+  webview-policy:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-24.04, windows-2025, macos-15]
+        os: ${{ fromJson(inputs.oses) }}
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 5
+    timeout-minutes: 80
+    defaults:
+      run:
+        working-directory: webview-policy
+        shell: bash
+    env:
+      PROBE_SYSTEM: ${{ matrix.os }}
+      VARIANTS: ${{ inputs.variants }}
     steps:
-      - shell: bash
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6
+        with:
+          bun-version: 1.4.3
+      - run: rustup toolchain install 1.99.1 --profile minimal && rustup default 1.99.1
+      - name: Linux dependencies
+        if: runner.os == 'Linux'
         run: |
-          uname -a
-          echo "$RUNNER_OS $RUNNER_ARCH $ImageOS $ImageVersion"
+          apt_options=(-o Acquire::Retries=1 -o Acquire::http::Timeout=25 -o Acquire::https::Timeout=25)
+          if [[ -f /etc/apt/sources.list.d/ubuntu.sources ]]; then
+            apt_options+=(-o Dir::Etc::sourcelist=/etc/apt/sources.list.d/ubuntu.sources -o Dir::Etc::sourceparts=-)
+          fi
+          sudo apt-get "${apt_options[@]}" update
+          sudo apt-get "${apt_options[@]}" install -y --no-install-recommends libwebkit2gtk-4.1-dev librsvg2-dev xvfb xauth dbus-x11
+      - uses: Swatinem/rust-cache@2201cc584a476d1b508be977bbe4b7d1c7a52e9c
+        with:
+          workspaces: |
+            webview-policy/src-tauri -> target
+            webview-policy/src-tauri-iso -> target
+          cache-on-failure: true
+      - name: Build
+        working-directory: webview-policy/src-tauri
+        run: cargo build --locked --features custom-protocol,v4
+      - name: Build with the isolation pattern
+        run: ./iso-build.sh build
+      - name: Record runner and engine
+        run: |
+          mkdir -p "results/$PROBE_SYSTEM"
+          {
+            echo "image_os=${ImageOS:-} image_version=${ImageVersion:-} runner_arch=${RUNNER_ARCH:-}"
+            uname -a
+            rustc --version
+            bun --version
+            case "$RUNNER_OS" in
+              macOS)
+                sw_vers
+                echo "webkit_bundle=$(defaults read /System/Library/Frameworks/WebKit.framework/Resources/Info.plist CFBundleVersion)"
+                echo "webkit_short=$(defaults read /System/Library/Frameworks/WebKit.framework/Resources/Info.plist CFBundleShortVersionString)"
+                ;;
+              Linux)
+                grep -E '^(PRETTY_NAME|VERSION_ID)=' /etc/os-release
+                dpkg-query -W libwebkit2gtk-4.1-0 libjavascriptcoregtk-4.1-0 xvfb
+                ;;
+              Windows)
+                cmd //c ver
+                powershell -NoProfile -Command "(Get-ItemProperty 'HKLM:\SOFTWARE\WOW6432Node\Microsoft\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}' -ErrorAction SilentlyContinue).pv"
+                ;;
+            esac
+          } 2>&1 | tee "results/$PROBE_SYSTEM/system.txt"
+      - name: Probe on Linux
+        if: runner.os == 'Linux'
+        run: dbus-run-session -- xvfb-run -a -s "-screen 0 1920x1080x24" bun harness/run.ts 2>&1 | tee "results/$PROBE_SYSTEM/run.log"
+      - name: Probe on macOS and Windows
+        if: runner.os != 'Linux'
+        run: bun harness/run.ts 2>&1 | tee "results/$PROBE_SYSTEM/run.log"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        if: always()
+        with:
+          name: webview-policy-${{ matrix.os }}
+          path: webview-policy/results/
+          if-no-files-found: warn

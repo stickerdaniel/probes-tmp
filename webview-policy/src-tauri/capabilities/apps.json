@@ -1,0 +1,5 @@
+{
+  "identifier": "apps",
+  "webviews": ["app-a", "app-b"],
+  "permissions": []
+}

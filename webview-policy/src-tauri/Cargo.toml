@@ -1,0 +1,25 @@
+[package]
+name = "webview-policy"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.89"
+
+[build-dependencies]
+tauri-build = { version = "=2.7.6", features = [] }
+
+[dependencies]
+tauri = { version = "=2.12.7", features = ["tracing"] }
+serde_json = "1"
+sha2 = "=0.10.9"
+base64 = "=0.22.1"
+tracing = "0.1"
+tracing-subscriber = { version = "=0.3.23", default-features = false, features = ["registry", "std"] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "=0.6.5"
+objc2-web-kit = { version = "=0.3.2", default-features = false, features = ["std", "objc2-app-kit", "WKWebViewConfiguration", "WKPreferences"] }
+
+[features]
+custom-protocol = ["tauri/custom-protocol"]
+v4 = ["tauri/unstable"]
+iso = ["tauri/isolation", "tauri-build/isolation"]
