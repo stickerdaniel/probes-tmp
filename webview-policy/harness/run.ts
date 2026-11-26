@@ -113,6 +113,7 @@ for (const entry of variants) {
     variant,
     launch,
     nonce,
+    startedAt: started,
     exitCode,
     killed,
     durationMs: Date.now() - started,
