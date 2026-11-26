@@ -380,7 +380,7 @@
     document.body.appendChild(cssom)
     R.render.cssom = attempt(() => getComputedStyle(cssom).width)
     const url = (kind, dns) => {
-      const base = dns ? cfg.sink.replace('127.0.0.1', `${kind}-${cfg.variant.toLowerCase()}.wp.test`) : cfg.sink
+      const base = dns ? cfg.sink.replace('127.0.0.1', `${kind}-${cfg.variant.toLowerCase()}.wp.test`) : cfg.navHost ? cfg.sink.replace('127.0.0.1', cfg.navHost) : cfg.sink
       return `${base}/e/${cfg.variant}/${cfg.app}/css-${kind}${dns ? '-dns' : ''}`
     }
     const box = (css) => {
@@ -569,7 +569,7 @@
     await wait(300)
     const dns = route.endsWith('-dns')
     const kind = dns ? route.slice(0, -4) : route
-    const base = dns ? cfg.sink.replace('127.0.0.1', `${kind}-${cfg.variant.toLowerCase()}.wp.test`) : cfg.sink
+    const base = dns ? cfg.sink.replace('127.0.0.1', `${kind}-${cfg.variant.toLowerCase()}.wp.test`) : cfg.navHost ? cfg.sink.replace('127.0.0.1', cfg.navHost) : cfg.sink
     const u = `${base}/e/${cfg.variant}/${cfg.app}/nav-${route}`
     const form = (target) => {
       const f = document.createElement('form')

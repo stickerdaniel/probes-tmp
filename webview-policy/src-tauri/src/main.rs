@@ -29,6 +29,8 @@ const NAV2_ROUTES: [&str; 14] = [
 ];
 const DEFAULT_ARGS: &str = "--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection --autoplay-policy=no-user-gesture-required";
 const HOST_RULES: &str = r#"--host-resolver-rules="MAP * ~NOTFOUND , EXCLUDE localhost , EXCLUDE *.localhost""#;
+const HOST_RULES_NO_SUB: &str = r#"--host-resolver-rules="MAP * ~NOTFOUND , EXCLUDE localhost""#;
+const HOST_RULES_OWN: &str = r#"--host-resolver-rules="MAP * ~NOTFOUND , EXCLUDE tauri.localhost , EXCLUDE ipc.localhost , EXCLUDE appa.localhost , EXCLUDE appb.localhost""#;
 const FEATURE_ARGS: &str = "--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection,LoadingPredictorUseLocalPredictions,LoadingPredictorUseOptimizationGuide,NavigationPredictor,PreconnectManagerDirectFastPath,SearchEnginePreconnect2,SpeculativeServiceWorkerWarmUp --autoplay-policy=no-user-gesture-required";
 const WEBRTC_ARG: &str = "--force-webrtc-ip-handling-policy=disable_non_proxied_udp";
 const UNTHROTTLE_ARGS: &str = "--disable-background-timer-throttling --disable-renderer-backgrounding --disable-backgrounding-occluded-windows";
@@ -125,6 +127,8 @@ enum Args {
     Proxy,
     Both,
     Features,
+    HostsNoSub,
+    HostsOwn,
 }
 
 fn csp_hash(alg: &str, text: &str) -> String {
@@ -236,6 +240,7 @@ struct Spec {
     style_policy: bool,
     host_hidden: bool,
     hold_activity: bool,
+    nav_host: Option<&'static str>,
 }
 
 fn spec(name: &str) -> Spec {
@@ -261,6 +266,7 @@ fn spec(name: &str) -> Spec {
         style_policy: false,
         host_hidden: false,
         hold_activity: false,
+        nav_host: None,
     };
     let srcdoc = |app| Frame { app, sandbox: "allow-scripts", source: Source::Srcdoc };
     let scheme = |app| Frame { app, sandbox: "allow-scripts", source: Source::Scheme };
@@ -315,6 +321,20 @@ fn spec(name: &str) -> Spec {
         };
         let all_hidden = matches!(m, b'N' | b'A');
         return Spec { bridge: Some(c), surface, unthrottle, host_hidden: all_hidden, hold_activity: *m == b'A', ..w2(Group::Surface, layout, vec![win("A", labels(c))]) };
+    }
+    if let [b'N', b'4', t, r, l] = name.as_bytes() {
+        let nav_host = match t {
+            b'L' => "localhost",
+            b'X' => "x.localhost",
+            _ => "127.0.0.1",
+        };
+        let args = match r {
+            b'S' => Args::HostsNoSub,
+            b'O' => Args::HostsOwn,
+            _ => Args::Hosts,
+        };
+        let layout = if *l == b'W' { Layout::Windows } else { Layout::Children };
+        return Spec { nav_host: Some(nav_host), args, ..w2(Group::Nav, layout, vec![win("A", "app-a")]) };
     }
     if let [b'D', b'3', c] = name.as_bytes() {
         let c = *c as char;
@@ -845,7 +865,7 @@ fn scheme_handler<R: Runtime>(
                 let route = query.strip_prefix("r=").unwrap_or("none").to_owned();
                 let phase = next_phase(&probe, fixture);
                 let s1 = HASH_SCRIPTS[0].2;
-                let fcfg = fixture_cfg(app, &probe, fixture, "frame", json!({ "route": route, "phase": phase, "bridge": s.bridge.map(String::from), "s1": s1 }));
+                let fcfg = fixture_cfg(app, &probe, fixture, "frame", json!({ "route": route, "phase": phase, "bridge": s.bridge.map(String::from), "s1": s1, "navHost": s.nav_host }));
                 let (srcdoc, doc_hashes) = match s.group {
                     Group::Docs => author_doc(&fcfg),
                     Group::Hashes => {
@@ -896,6 +916,8 @@ fn browser_args(s: &Spec) -> Option<String> {
         Args::Stock => return s.webrtc_arg.then(|| format!("{DEFAULT_ARGS} {WEBRTC_ARG}")),
         Args::Features => return Some(FEATURE_ARGS.to_owned()),
         Args::Hosts => HOST_RULES.to_owned(),
+        Args::HostsNoSub => HOST_RULES_NO_SUB.to_owned(),
+        Args::HostsOwn => HOST_RULES_OWN.to_owned(),
         Args::Proxy => proxy(),
         Args::Both => format!("{HOST_RULES} {}", proxy()),
     };

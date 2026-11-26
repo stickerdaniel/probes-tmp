@@ -3,7 +3,7 @@ import { basename, join } from 'node:path'
 
 type Json = Record<string, any>
 
-const sets: Record<string, string[]> = { bridge: [], repeat: [], release: [] }
+const sets: Record<string, string[]> = { bridge: [], repeat: [], release: [], localhost: [] }
 let mode = 'bridge'
 for (const a of process.argv.slice(2)) {
   if (a.startsWith('--')) mode = a.slice(2)
@@ -217,6 +217,24 @@ if (sets.release.length) {
         out.push(`| ${engine(dir)} | ${f} (${r?.profile}) | ${A ? `${A.rt.ok} + ${B?.rt?.ok ?? 'n/a'} of 200` : 'no report'} | ${num(pct(ms, 0.5))} | ${num(ms.length ? Math.max(...ms) : null)} | ${r ? directTags(r).length : 'n/a'} | ${r ? layerTwoIpc(r).length : 'n/a'} | | | | |`)
       } else if (f.startsWith('N')) out.push(`| ${engine(dir)} | ${f} (${r?.profile}) | | | | | | ${navCell(r).join(' | ')} | |`)
       else out.push(`| ${engine(dir)} | ${f} (${r?.profile}) | | | | | | | | | ${r?.report ? (r.udp ?? []).length : 'no report'} |`)
+    }
+  }
+}
+
+if (sets.localhost.length) {
+  out.push('', '## Loopback names under the resolver rule (WebView2)', '')
+  out.push('Cells: sink requests / sink TCP without request / resolver queries / proxy connections.', '')
+  out.push('| Target | Rule | Layer 1 | IP literal routes, 6 | host name routes, 3 | sandbox-closed routes, 5 | Host header seen | Host page | Wrapper | Harness IPC |')
+  out.push('| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |')
+  const T: Record<string, string> = { L: 'localhost', X: 'x.localhost', I: '127.0.0.1' }
+  const RU: Record<string, string> = { H: 'section 8 rule', S: 'without *.localhost exclusion', O: 'own names excluded' }
+  for (const dir of sets.localhost) {
+    for (const t of 'LXI') for (const ru of 'HSO') for (const l of 'CW') {
+      const v = `N4${t}${ru}${l}`
+      const r = load(dir, v)
+      if (!r) continue
+      const hosts = [...new Set((r.sink ?? []).map((h: Json) => h.host).filter(Boolean))].join(', ') || 'none'
+      out.push(`| ${T[t]} | ${RU[ru]} | ${l === 'C' ? 'child' : 'window'} (${v}) | ${navCell(r).join(' | ')} | ${hosts} | ${r.report?.events?.['host.info'] ? 'loaded' : 'no report'} | ${r.report?.events?.['A.navready-none'] ? 'loaded' : 'no report'} | ${r.report?.complete ? 'complete' : 'incomplete'} |`)
     }
   }
 }

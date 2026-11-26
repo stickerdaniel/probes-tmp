@@ -46,6 +46,12 @@ const sink = createServer((socket: Socket) => {
 })
 await new Promise<void>((r) => sink.listen(0, '127.0.0.1', r))
 const sinkPort = (sink.address() as { port: number }).port
+const sink6 = createServer((socket) => sink.emit('connection', socket))
+const sink6Bound = await new Promise<string>((r) => {
+  sink6.once('error', (e) => r(`error ${String(e).slice(0, 120)}`))
+  sink6.listen(sinkPort, '::1', () => r('bound'))
+})
+console.log(`sink 127.0.0.1:${sinkPort}, [::1]:${sinkPort} ${sink6Bound}`)
 
 type Query = { t: number; name: string; qtype: number }
 const queries: Query[] = []
@@ -226,5 +232,6 @@ writeFileSync(join(outDir, 'dns-all.json'), JSON.stringify(queries, null, 2))
 dnsServer?.close()
 proxy.close()
 sink.close()
+sink6.close()
 for (const u of udps) u.close()
 process.exit(0)
