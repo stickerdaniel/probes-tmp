@@ -16,6 +16,7 @@
   addEventListener('message', (e) => {
     const d = e.data
     if (!d || d.probe !== 1) return
+    if (d.kind === 'hb') return invoke('probe_heartbeat', { source: d.app }).catch(() => {})
     const source = Object.keys(frames).find((a) => frames[a].contentWindow === e.source) || 'unknown'
     event(d.app, d.kind, { source, origin: e.origin, report: d.data })
   })

@@ -163,6 +163,7 @@ struct Inner {
     new_windows: Vec<Value>,
     downloads: Vec<Value>,
     heartbeats: Vec<u64>,
+    doc_beats: HashMap<String, Vec<u64>>,
     loads: HashMap<String, u32>,
     destroyed: HashMap<String, u64>,
     notes: Map<String, Value>,
@@ -327,9 +328,13 @@ fn probe_event(app: String, kind: String, data: Value, probe: State<'_, Probe>) 
 }
 
 #[tauri::command]
-fn probe_heartbeat(probe: State<'_, Probe>) {
+fn probe_heartbeat(source: Option<String>, probe: State<'_, Probe>) {
     let ms = probe.ms();
-    probe.inner.lock().unwrap().heartbeats.push(ms);
+    let mut inner = probe.inner.lock().unwrap();
+    match source {
+        Some(s) => inner.doc_beats.entry(s).or_default().push(ms),
+        None => inner.heartbeats.push(ms),
+    }
 }
 
 #[tauri::command]
@@ -338,6 +343,11 @@ fn probe_report(report: Value, probe: State<'_, Probe>) {
 }
 
 fn on_title(probe: &Probe, label: &str, title: &str) {
+    if let Some(app) = title.strip_prefix("HB|").and_then(|r| r.split('|').next()) {
+        let ms = probe.ms();
+        probe.inner.lock().unwrap().doc_beats.entry(app.to_owned()).or_default().push(ms);
+        return;
+    }
     let parts: Vec<&str> = title.splitn(6, '|').collect();
     let [tag, app, kind, i, n, chunk] = parts.as_slice() else { return };
     if *tag != "PROBE" {
@@ -780,7 +790,10 @@ fn hang<R: Runtime>(handle: &AppHandle<R>, probe: &Probe, s: &Spec) -> bool {
     };
     std::thread::sleep(Duration::from_millis(2500));
     let t_end = probe.ms();
-    let beats = probe.inner.lock().unwrap().heartbeats.clone();
+    let (beats, doc) = {
+        let inner = probe.inner.lock().unwrap();
+        (inner.heartbeats.clone(), inner.doc_beats.get("A").cloned().unwrap_or_default())
+    };
     probe.note(
         "hangResult",
         json!({
@@ -788,6 +801,8 @@ fn hang<R: Runtime>(handle: &AppHandle<R>, probe: &Probe, s: &Spec) -> bool {
             "afterRemoval": max_gap(&beats, t_rm, t_end),
             "removal": removal,
             "beforeHang": max_gap(&beats, t_hang.saturating_sub(1500), t_hang),
+            "documentBefore": max_gap(&doc, t_hang.saturating_sub(1500), t_hang),
+            "documentDuring": max_gap(&doc, t_hang, t_hang + 10_000),
         }),
     );
     ok

@@ -253,6 +253,12 @@
   }
 
   async function hang() {
+    let beat = 0
+    setInterval(() => {
+      beat++
+      if (framed) parent.postMessage({ probe: 1, app: cfg.app, kind: 'hb' }, '*')
+      else document.title = `HB|${cfg.app}|${beat}`
+    }, 100)
     window.__probeHang = () => {
       for (;;) {}
     }

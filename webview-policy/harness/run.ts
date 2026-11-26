@@ -94,6 +94,14 @@ for (const entry of variants) {
     stdout: Bun.file(join(dir, 'stdout.log')),
     stderr: Bun.file(join(dir, 'stderr.log')),
   })
+  const processes: Promise<string[]> =
+    process.platform === 'win32'
+      ? Bun.sleep(5000).then(async () => {
+          const ps = Bun.spawn(['powershell', '-NoProfile', '-Command', "Get-CimInstance Win32_Process -Filter \"Name='msedgewebview2.exe'\" | ForEach-Object { $_.CommandLine }"], { stdout: 'pipe' })
+          const text = await new Response(ps.stdout).text()
+          return [...new Set(text.split(/\r?\n/).filter((l) => !/--type=/.test(l)).map((l) => l.trim()).filter(Boolean).map((l) => l.replace(/"[^"]*msedgewebview2\.exe"/, 'msedgewebview2.exe').replace(/--user-data-dir=("[^"]*"|\S+)/, '--user-data-dir=<dir>').slice(0, 600)))]
+        })
+      : Promise.resolve([])
   let killed = false
   const timer = setTimeout(() => ((killed = true), proc.kill()), 180_000)
   const exitCode = await proc.exited
@@ -115,6 +123,7 @@ for (const entry of variants) {
     sink: hits.filter((h) => h.variant === entry || h.firstLine.includes(`/e/${variant}/`)),
     udp: datagrams.filter((d) => d.variant === entry),
     downloadFile: existsSync(join(dir, 'download.bin')),
+    webviewProcesses: await processes,
     stderrTail: tail(join(dir, 'stderr.log')),
   }
   writeFileSync(file, JSON.stringify(result, null, 2))
