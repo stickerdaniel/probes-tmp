@@ -182,7 +182,7 @@ async function parent(row: string, python: string, script: string) {
       await one.ready;
       await Bun.sleep(120);
       const single = await sample([one]);
-      const others = ["worker-b", "worker-c", "worker-d"].map(start);
+      const others = ["worker-b", "worker-c", "worker-d"].map(app => start(app));
       await Promise.all(others.map(instance => instance.ready));
       await Bun.sleep(120);
       const four = await sample(workers);

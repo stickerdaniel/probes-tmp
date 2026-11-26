@@ -93,7 +93,7 @@ def observe(command, cwd, seconds, rss_limit=0, handshake=False):
                         if rss_limit and current["rssBytes"] >= rss_limit and not watchdog:
                             watchdog = "RSS"
                             snapshots["kill"] = current["rssBytes"]
-                            kill(child)
+                            child.kill()
                         time.sleep(0.005 if rss_limit else 0.003)
                 finally:
                     if child.returncode is None:
@@ -148,6 +148,7 @@ def main():
         empty = stage / "empty"
         empty.mkdir()
         built = set()
+        failed = []
         for entry in selected:
             output = binary(stage, entry)
             flags = [
@@ -168,8 +169,13 @@ def main():
                 stem = "-".join([entry, *parameters])
                 handshake = parameters == ["r3"] or (len(parameters) == 2 and parameters[0] == "r7")
                 sample_limit = 512 * os_memory.MIB if parameters == ["r3"] else 0
-                record(raw, stem, **observe([binary(stage, entry), *parameters], empty, 8,
-                                            rss_limit=sample_limit, handshake=handshake))
+                result = observe([binary(stage, entry), *parameters], empty, 8,
+                                 rss_limit=sample_limit, handshake=handshake)
+                record(raw, stem, **result)
+                if result["watchdog"] == "wall" or (
+                    result["returncode"] and stem not in ("quick-default-r1", "quick-r3")
+                ):
+                    failed.append(stem)
         if "process-probe" in built:
             for row in PROCESS_ROWS:
                 if row == "os-limit" and sys.platform == "darwin":
@@ -177,9 +183,14 @@ def main():
                 if row == "cgroup" and sys.platform != "linux":
                     continue
                 command = [binary(stage, "process-probe"), "parent", row, sys.executable, __file__]
-                record(raw, f"process-{row}", **observe(command, empty, 15))
+                result = observe(command, empty, 15)
+                record(raw, f"process-{row}", **result)
+                if result["returncode"]:
+                    failed.append(f"process-{row}")
         if built != set(selected):
             raise SystemExit("One or more probes did not build")
+        if failed:
+            raise SystemExit("Probe execution failed: " + ", ".join(failed))
 
 
 if __name__ == "__main__":
