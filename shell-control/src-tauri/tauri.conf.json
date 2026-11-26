@@ -1,0 +1,22 @@
+{
+  "productName": "ShellControlProbe",
+  "version": "0.1.0",
+  "identifier": "dev.probe.shellcontrol",
+  "build": {
+    "frontendDist": "../ui"
+  },
+  "app": {
+    "windows": []
+  },
+  "bundle": {
+    "active": true,
+    "targets": ["app", "deb", "nsis"],
+    "externalBin": ["binaries/probe-engine"],
+    "icon": ["icons/icon.png", "icons/icon.ico", "icons/icon.icns"],
+    "windows": {
+      "nsis": {
+        "installMode": "currentUser"
+      }
+    }
+  }
+}

@@ -4,15 +4,64 @@ on:
 permissions:
   contents: read
 jobs:
-  info:
+  shell-control:
     strategy:
       fail-fast: false
       matrix:
         os: [ubuntu-24.04, windows-2025, macos-15]
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 5
+    timeout-minutes: 25
+    defaults:
+      run:
+        working-directory: shell-control
+        shell: bash
     steps:
-      - shell: bash
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6
+        with:
+          bun-version: 1.4.3
+      - run: rustup toolchain install 1.99.1 --profile minimal && rustup default 1.99.1
+      - name: Linux dependencies
+        if: runner.os == 'Linux'
         run: |
-          uname -a
-          echo "$RUNNER_OS $RUNNER_ARCH $ImageOS $ImageVersion"
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev xvfb xauth dbus-x11
+      - run: bun install --frozen-lockfile --ignore-scripts --registry https://registry.npmjs.org
+      - name: Record runner and package
+        run: |
+          mkdir -p results
+          {
+            uname -a
+            echo "$RUNNER_OS $RUNNER_ARCH $ImageOS $ImageVersion"
+            rustc --version
+            bun --version
+            bun package.ts
+          } 2>&1 | tee results/package.log
+      - name: Exercise installed Linux package
+        if: runner.os == 'Linux'
+        run: |
+          sudo dpkg -i src-tauri/target/release/bundle/deb/*.deb
+          dbus-run-session -- xvfb-run -a bun run.ts /usr/bin/shell-control results/probe
+      - name: Exercise installed Windows package
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $installer = Get-ChildItem src-tauri/target/release/bundle/nsis/*-setup.exe | Select-Object -First 1
+          $install = Start-Process -FilePath $installer.FullName -ArgumentList '/S' -Wait -PassThru
+          if ($install.ExitCode -ne 0) { exit $install.ExitCode }
+          bun run.ts "$env:LOCALAPPDATA/ShellControlProbe/shell-control.exe" results/probe
+          exit $LASTEXITCODE
+      - name: Exercise macOS app
+        if: runner.os == 'macOS'
+        run: bun run.ts src-tauri/target/release/bundle/macos/ShellControlProbe.app/Contents/MacOS/shell-control results/probe
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        if: always()
+        with:
+          name: shell-control-${{ matrix.os }}
+          path: |
+            shell-control/results/**/*.log
+            shell-control/results/**/*.json
+            shell-control/results/**/*.jsonl
+          if-no-files-found: warn

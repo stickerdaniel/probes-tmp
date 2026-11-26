@@ -1,0 +1,8 @@
+{
+  "name": "shell-control",
+  "private": true,
+  "type": "module",
+  "devDependencies": {
+    "@tauri-apps/cli": "2.12.6"
+  }
+}
