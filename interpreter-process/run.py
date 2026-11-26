@@ -24,7 +24,7 @@ RUNS = [
     ("quick", "r8"), ("restricted",),
     *(("release", "wasm", size, mode) for size in ("16", "64") for mode in ("loop", "single", "growth")),
 ]
-PROCESS_ROWS = ("start", "rss", "watch", "control", "os-limit", "pending", "event")
+PROCESS_ROWS = ("start", "rss", "watch", "control", "os-limit", "cgroup", "pending", "event")
 
 
 def record(raw, name, **result):
@@ -173,6 +173,8 @@ def main():
         if "process-probe" in built:
             for row in PROCESS_ROWS:
                 if row == "os-limit" and sys.platform == "darwin":
+                    continue
+                if row == "cgroup" and sys.platform != "linux":
                     continue
                 command = [binary(stage, "process-probe"), "parent", row, sys.executable, __file__]
                 record(raw, f"process-{row}", **observe(command, empty, 15))

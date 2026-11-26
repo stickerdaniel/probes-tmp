@@ -79,12 +79,14 @@ async function worker(app: string) {
   }
 }
 
-function launch(app: string) {
+function launch(app: string, cgroup: boolean) {
   const started = performance.now();
   const env = process.platform === "win32"
     ? { SystemRoot: process.env.SystemRoot, WINDIR: process.env.WINDIR }
     : {};
-  const child = Bun.spawn([process.execPath, "worker", app], {
+  const command = [process.execPath, "worker", app];
+  const gated = ["/bin/sh", "-c", 'IFS= read -r start && exec "$@"', "worker", ...command];
+  const child = Bun.spawn(cgroup ? gated : command, {
     stdin: "pipe", stdout: "pipe", stderr: "inherit", env, windowsHide: true,
   });
   const frames: Frame[] = [];
@@ -102,6 +104,10 @@ function launch(app: string) {
   void received.catch(error => ready.reject(error));
   return {
     child, ready: ready.promise, frames, received,
+    begin() {
+      child.stdin.write("start\n");
+      child.stdin.flush();
+    },
     send(message: Frame) {
       child.stdin.write(encoded(message));
       child.stdin.flush();
@@ -148,8 +154,8 @@ function monitor(python: string, script: string) {
 
 async function parent(row: string, python: string, script: string) {
   const workers: ReturnType<typeof launch>[] = [];
-  const start = (app: string) => {
-    const instance = launch(app);
+  const start = (app: string, cgroup = false) => {
+    const instance = launch(app, cgroup);
     workers.push(instance);
     return instance;
   };
@@ -181,13 +187,20 @@ async function parent(row: string, python: string, script: string) {
       await Bun.sleep(120);
       const four = await sample(workers);
       emit({ row, single, four, totalBytes: four.reduce((sum, entry) => sum + entry.rssBytes, 0) });
-    } else if (row === "watch" || row === "os-limit" || row === "control") {
-      const worker = start("worker-a");
+    } else if (row === "watch" || row === "os-limit" || row === "control" || row === "cgroup") {
+      const worker = start("worker-a", row === "cgroup");
+      let limit;
+      if (row === "cgroup") {
+        limit = await observer.call("cgroup", [worker.child.pid]);
+        if (!limit.limit) {
+          emit({ row, limit });
+          return;
+        }
+        worker.begin();
+      }
       const { frame } = await worker.ready;
       const before = (await sample([worker]))[0];
-      const limit = row === "os-limit"
-        ? await observer.call("limit", [worker.child.pid])
-        : undefined;
+      if (row === "os-limit") limit = await observer.call("limit", [worker.child.pid]);
       if (limit && !limit.limit) {
         emit({ row, before, limit });
         return;
@@ -212,7 +225,9 @@ async function parent(row: string, python: string, script: string) {
       const allocated = worker.frames.filter(frame => frame.kind === "allocated").at(-1);
       const error = worker.frames.find(frame => frame.kind === "allocation-error");
       const done = worker.frames.find(frame => frame.kind === "growth-done");
-      const kernelPeak = row === "os-limit" ? await observer.call("peak", [worker.child.pid]) : undefined;
+      if (row === "cgroup" && !done) await worker.child.exited;
+      const peakOperation = { "os-limit": "peak", cgroup: "cgroup-peak" }[row as "os-limit" | "cgroup"];
+      const kernelPeak = peakOperation ? await observer.call(peakOperation, [worker.child.pid]) : undefined;
       if (done) {
         worker.send({ kind: "stop" });
         await worker.child.exited;

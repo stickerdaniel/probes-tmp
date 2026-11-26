@@ -1,5 +1,7 @@
 import ctypes as c
 import json
+import os
+import subprocess
 import sys
 from pathlib import Path
 
@@ -129,6 +131,39 @@ def set_limit(pid, jobs):
     raise RuntimeError("OS hard limit was scoped to Windows and Linux")
 
 
+def privileged(*command, value=None):
+    prefix = [] if os.geteuid() == 0 else ["sudo", "-n"]
+    result = subprocess.run([*prefix, *command], input=value, text=True, capture_output=True, timeout=5)
+    if result.returncode:
+        raise RuntimeError(result.stderr.strip() or f"{command[0]} exited {result.returncode}")
+
+
+def set_cgroup(pid, groups):
+    path = Path(f"/sys/fs/cgroup/interpreter-probe-{os.getpid()}-{pid}")
+    privileged("mkdir", str(path))
+    groups[pid] = path
+    cap = 256 * MIB
+    privileged("tee", str(path / "memory.max"), value=f"{cap}\n")
+    privileged("tee", str(path / "memory.swap.max"), value="0\n")
+    privileged("tee", str(path / "cgroup.procs"), value=f"{pid}\n")
+    return {
+        "type": "cgroup-v2",
+        "memoryMaxBytes": int((path / "memory.max").read_text()),
+        "memorySwapMaxBytes": int((path / "memory.swap.max").read_text()),
+        "workerJoined": str(pid) in (path / "cgroup.procs").read_text().split(),
+    }
+
+
+def cgroup_peak(path):
+    return {
+        "memoryPeakBytes": int((path / "memory.peak").read_text()),
+        "memoryCurrentBytes": int((path / "memory.current").read_text()),
+        "events": {key: int(value) for key, value in (
+            line.split() for line in (path / "memory.events").read_text().splitlines()
+        )},
+    }
+
+
 def peak(pid, jobs):
     if sys.platform != "win32":
         return sample(pid)
@@ -139,6 +174,7 @@ def peak(pid, jobs):
 
 def monitor():
     jobs = {}
+    groups = {}
     try:
         for line in sys.stdin:
             request = json.loads(line)
@@ -148,13 +184,22 @@ def monitor():
                     answer = {"samples": [sample(pid) for pid in pids]}
                 elif op == "limit":
                     answer = {"limit": set_limit(pids[0], jobs)}
+                elif op == "cgroup":
+                    answer = {"limit": set_cgroup(pids[0], groups)}
+                elif op == "cgroup-peak":
+                    answer = {"limit": cgroup_peak(groups[pids[0]])}
                 elif op == "peak":
                     answer = {"limit": peak(pids[0], jobs)}
                 else:
                     raise ValueError(op)
-            except (OSError, RuntimeError, KeyError) as exc:
+            except (OSError, RuntimeError, KeyError, subprocess.TimeoutExpired) as exc:
                 answer = {"error": str(exc)}
             print(json.dumps(answer), flush=True)
     finally:
         for job in jobs.values():
             close_handle(job)
+        for path in groups.values():
+            try:
+                privileged("rmdir", str(path))
+            except RuntimeError as exc:
+                print(str(exc), file=sys.stderr)
