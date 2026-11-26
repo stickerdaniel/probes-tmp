@@ -158,6 +158,54 @@ function hostZone() {
   }
 }
 
+function measureHostZone() {
+  if (process.env.RUNNER_ENVIRONMENT !== "github-hosted" || builds.timezone.exit !== 0) return null;
+  const before = hostZone();
+  let set: string[];
+  let reset: string[];
+  if (process.platform === "win32" && typeof before === "object" && before?.exit === 0) {
+    set = ["tzutil", "/s", "Tokyo Standard Time"];
+    reset = ["tzutil", "/s", before.stdout.trim()];
+  } else if (process.platform === "darwin" && typeof before === "string" && before.includes("/zoneinfo/")) {
+    set = ["sudo", "-n", "systemsetup", "-settimezone", "Asia/Tokyo"];
+    reset = ["sudo", "-n", "systemsetup", "-settimezone", before.split("/zoneinfo/")[1]];
+  } else if (process.platform === "linux" && typeof before === "string") {
+    set = ["sudo", "-n", "ln", "-sfn", "/usr/share/zoneinfo/Asia/Tokyo", "/etc/localtime"];
+    reset = ["sudo", "-n", "ln", "-sfn", before, "/etc/localtime"];
+  } else {
+    return null;
+  }
+
+  const environment = { ...env };
+  delete environment.TZ;
+  const changed = run(set, source);
+  try {
+    return {
+      before,
+      changed,
+      after: hostZone(),
+      measurements: changed.exit === 0 ? {
+        rows: execute("timezone", ["rows"], empty, environment),
+        metadata: execute("timezone", ["metadata"], empty, environment),
+      } : null,
+      reset: run(reset, source),
+      restored: hostZone(),
+    };
+  } catch (error) {
+    run(reset, source);
+    throw error;
+  }
+}
+
+function traceConfigFiles() {
+  if (process.platform !== "linux" || builds.probe.exit !== 0 || builds.control.exit !== 0) return null;
+  const strace = join(output, "strace", "usr", "bin", "strace");
+  const files = ["package.json", "bunfig.toml", ".env"].flatMap((file) => ["-P", join(planted, file)]);
+  const trace = (name: "probe" | "control") =>
+    run([strace, "-qq", "-f", "-e", "trace=%file", ...files, binary(name), "environment"], planted);
+  return { version: run([strace, "--version"], source), flagged: trace("probe"), control: trace("control") };
+}
+
 const linkage = builds.timezone.exit !== 0 || process.platform === "win32" ? null :
   process.platform === "darwin" ? run(["otool", "-L", binary("timezone")], source) :
     run(["ldd", binary("timezone")], source);
@@ -201,6 +249,8 @@ const result = {
   p2,
   linkage,
   nativeTzVersion,
+  hostZoneChange: measureHostZone(),
+  configTrace: traceConfigFiles(),
 };
 writeFileSync(resultFile, JSON.stringify(result, null, 2) + "\n");
 console.log(JSON.stringify({ platform: result.system.platform, architecture: result.system.architecture, row5: p1.row5 }));

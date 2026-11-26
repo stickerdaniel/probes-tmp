@@ -22,6 +22,14 @@ jobs:
         with:
           bun-version: 1.4.3
       - run: bun install --cwd cli-timezone --ignore-scripts --frozen-lockfile --registry https://registry.npmjs.org
+      - name: Prepare the file access tracer
+        if: runner.os == 'Linux'
+        continue-on-error: true
+        run: |
+          mkdir -p .probe-output
+          curl -fsSL https://archive.ubuntu.com/ubuntu/pool/main/s/strace/strace_6.8-0ubuntu2_amd64.deb -o .probe-output/strace.deb
+          printf '%s  %s\n' d588810ae26b06fee6678dc81e5b54f6efcde8e718e4589adb4d11d254b9820b .probe-output/strace.deb | sha256sum -c
+          dpkg-deb -x .probe-output/strace.deb .probe-output/strace
       - run: bun cli-timezone/run.ts
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
         if: always()
