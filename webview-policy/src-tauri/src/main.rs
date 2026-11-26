@@ -21,7 +21,7 @@ use tauri::{
 
 static FIXTURE_JS: LazyLock<String> = LazyLock::new(|| include_str!("../../fixture/document.js").replace("\r\n", "\n"));
 static WRAPPER_JS: LazyLock<String> = LazyLock::new(|| include_str!("../../fixture/wrapper.js").replace("\r\n", "\n"));
-const DEADLINE: Duration = Duration::from_secs(200);
+const DEADLINE: Duration = Duration::from_secs(300);
 const WEBRTC_ROUTES: [&str; 7] = ["direct", "saved", "webkit", "blank", "srcdoc", "open", "worker"];
 const NAV_ROUTES: [&str; 8] = ["topnav", "assign", "link", "form-self", "form-blank", "meta", "open", "download"];
 const NAV2_ROUTES: [&str; 14] = [
@@ -47,6 +47,7 @@ enum Group {
     Assets,
     Storage,
     Hang,
+    Bridge,
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -107,6 +108,7 @@ struct Spec {
     frame_sandbox: &'static str,
     args: Args,
     frame_cancel: bool,
+    bridge: Option<char>,
 }
 
 fn spec(name: &str) -> Spec {
@@ -126,6 +128,7 @@ fn spec(name: &str) -> Spec {
         frame_sandbox: "allow-scripts",
         args: Args::Stock,
         frame_cancel: false,
+        bridge: None,
     };
     let srcdoc = |app| Frame { app, sandbox: "allow-scripts", source: Source::Srcdoc };
     let scheme = |app| Frame { app, sandbox: "allow-scripts", source: Source::Scheme };
@@ -134,6 +137,28 @@ fn spec(name: &str) -> Spec {
     let windows = |group, a: Vec<App>| Spec { apps: a, ..base(group, Layout::Windows) };
     let children = |group, a: Vec<App>| Spec { apps: a, ..base(group, Layout::Children) };
     let w2 = |group, layout, a: Vec<App>| Spec { apps: a, wrap: true, init_all_frames: true, nav_guard: true, ..base(group, layout) };
+    let b3 = |group, layout, c: char, two: bool| {
+        let (a, b) = match c {
+            'S' => ("bs-a", "bs-b"),
+            'C' => ("bc-a", "bc-b"),
+            _ => ("bt-a", "bt-b"),
+        };
+        let apps = if two { vec![win("A", a), win("B", b)] } else { vec![win("A", a)] };
+        Spec { bridge: Some(c), args: Args::Hosts, ..w2(group, layout, apps) }
+    };
+    if let [p0, p1, c, l] = name.as_bytes() {
+        let layout = if *l == b'W' { Layout::Windows } else { Layout::Children };
+        let c = *c as char;
+        if *p1 == b'3' && matches!(c, 'S' | 'C' | 'T') && matches!(*l, b'C' | b'W') {
+            match *p0 {
+                b'B' | b'X' => return b3(Group::Bridge, layout, c, true),
+                b'H' => return b3(Group::Hang, layout, c, true),
+                b'N' => return b3(Group::Nav, layout, c, false),
+                b'R' => return b3(Group::Rtc, layout, c, false),
+                _ => {}
+            }
+        }
+    }
     match name {
         "RF0" => frames(Group::Rtc, vec![srcdoc("A")]),
         "RF1" => Spec { policy: Policy::WebrtcBlock, ..frames(Group::Rtc, vec![srcdoc("A")]) },
@@ -229,6 +254,8 @@ struct Inner {
     new_windows: Vec<Value>,
     downloads: Vec<Value>,
     heartbeats: Vec<u64>,
+    host_replies: Vec<Value>,
+    bridge_chunks: HashMap<String, Vec<Option<String>>>,
     doc_beats: HashMap<String, Vec<u64>>,
     loads: HashMap<String, u32>,
     destroyed: HashMap<String, u64>,
@@ -288,9 +315,14 @@ fn policy_text(policy: Policy, hash: &str, app: &str) -> Option<String> {
     }
 }
 
-fn wrapper_policy(wrapper: &str, document: &str, open: bool) -> String {
-    let frames = if open { "* isolation: http://isolation.localhost" } else { "'none'" };
-    format!("default-src 'none'; script-src '{wrapper}' '{document}'; frame-src {frames}; child-src {frames}")
+fn wrapper_policy(wrapper: &str, document: &str, open: bool, bridge: Option<char>, app: &str) -> String {
+    let frames = match (open, bridge) {
+        (true, _) => "* isolation: http://isolation.localhost",
+        (false, Some('C')) if cfg!(feature = "iso") => "isolation: http://isolation.localhost",
+        _ => "'none'",
+    };
+    let connect = if bridge == Some('S') { format!("; connect-src {}", own_origin(app)) } else { String::new() };
+    format!("default-src 'none'; script-src '{wrapper}' '{document}'; frame-src {frames}; child-src {frames}{connect}")
 }
 
 fn wrapper_html(cfg: &Value, app: &str) -> String {
@@ -313,11 +345,80 @@ fn next_phase(probe: &Probe, fixture: &str) -> String {
 }
 
 fn label_app(label: &str) -> Option<&'static str> {
-    match label {
-        "app-a" => Some("A"),
-        "app-b" => Some("B"),
-        "ctl-a" => Some("A"),
-        _ => None,
+    if label.ends_with("-a") {
+        Some("A")
+    } else if label.ends_with("-b") {
+        Some("B")
+    } else {
+        None
+    }
+}
+
+fn own_origin(app: &str) -> String {
+    own_base(app).trim_end_matches('/').to_owned()
+}
+
+fn bridge_answer<R: Runtime>(app: &AppHandle<R>, label: &str, via: &str, origin: Option<String>, body: &Value) -> Value {
+    let probe = app.state::<Probe>();
+    let me = label_app(label).unwrap_or("none");
+    let op = body["op"].as_str().unwrap_or("").to_owned();
+    let len = body["data"].as_str().map(str::len).unwrap_or(0);
+    probe.append(
+        "bridge.log",
+        json!({ "label": label, "app": me, "via": via, "origin": origin, "op": op, "tag": body["tag"], "claimApp": body["app"], "claimOrigin": body["origin"], "n": body["n"], "len": len, "ms": probe.ms() }),
+    );
+    match op.as_str() {
+        "hostreply" => {
+            let ms = probe.ms();
+            probe.inner.lock().unwrap().host_replies.push(json!({ "label": label, "id": body["id"], "ms": ms }));
+            json!({ "app": me, "op": op })
+        }
+        "size" => {
+            let n = body["replySize"].as_u64().unwrap_or(0) as usize;
+            json!({ "app": me, "op": op, "len": len, "data": "b".repeat(n) })
+        }
+        _ => json!({ "app": me, "op": op, "n": body["n"] }),
+    }
+}
+
+#[tauri::command]
+fn bridge_call(body: Value, webview: tauri::Webview) -> Value {
+    let url = webview.url().ok().map(|u| u.to_string());
+    bridge_answer(webview.app_handle(), webview.label(), "command", url, &body)
+}
+
+fn on_title_app<R: Runtime>(app: &AppHandle<R>, label: &str, title: &str) {
+    let Some(rest) = title.strip_prefix("BRQ|") else {
+        on_title(&app.state::<Probe>(), label, title);
+        return;
+    };
+    let parts: Vec<&str> = rest.splitn(4, '|').collect();
+    let [id, i, n, chunk] = parts.as_slice() else { return };
+    let (Ok(id), Ok(i), Ok(n)) = (id.parse::<u64>(), i.parse::<usize>(), n.parse::<usize>()) else { return };
+    let probe = app.state::<Probe>();
+    let key = format!("{label}:{id}");
+    let joined = {
+        let mut inner = probe.inner.lock().unwrap();
+        let slots = inner.bridge_chunks.entry(key.clone()).or_insert_with(|| vec![None; n]);
+        if slots.len() != n || i >= n {
+            return;
+        }
+        slots[i] = Some((*chunk).to_owned());
+        if !slots.iter().all(Option::is_some) {
+            return;
+        }
+        let joined: String = slots.iter().flatten().map(String::as_str).collect();
+        inner.bridge_chunks.remove(&key);
+        joined
+    };
+    let body = base64::engine::general_purpose::STANDARD
+        .decode(joined)
+        .ok()
+        .and_then(|b| serde_json::from_slice::<Value>(&b).ok())
+        .unwrap_or(Value::Null);
+    let reply = bridge_answer(app, label, "title", None, &body);
+    if let Some(w) = app.get_webview(label) {
+        let _ = w.eval(format!("window.__bridgeReply({id}, {reply})"));
     }
 }
 
@@ -519,11 +620,21 @@ fn scheme_handler<R: Runtime>(
             "/wrap.html" => {
                 let route = query.strip_prefix("r=").unwrap_or("none").to_owned();
                 let phase = next_phase(&probe, fixture);
-                let fcfg = fixture_cfg(app, &probe, fixture, "frame", json!({ "route": route, "phase": phase }));
+                let fcfg = fixture_cfg(app, &probe, fixture, "frame", json!({ "route": route, "phase": phase, "bridge": s.bridge.map(String::from) }));
                 let fpolicy = policy_text(Policy::Base, &probe.hash, fixture);
                 let srcdoc = fixture_html(&fcfg, fpolicy.as_deref(), fixture);
-                let wcfg = json!({ "app": fixture, "group": format!("{:?}", s.group), "variant": probe.variant, "route": route, "phase": phase, "srcdoc": srcdoc, "sandbox": s.frame_sandbox });
-                respond(200, "text/html; charset=utf-8", wrapper_html(&wcfg, fixture).into_bytes(), Some(wrapper_policy(&probe.wrap_hash, &probe.hash, s.frame_src_open)))
+                let wcfg = json!({
+                    "app": fixture, "group": format!("{:?}", s.group), "variant": probe.variant, "route": route, "phase": phase, "srcdoc": srcdoc, "sandbox": s.frame_sandbox,
+                    "bridge": s.bridge.map(String::from), "bridgeUrl": format!("{}bridge", own_base(fixture)),
+                });
+                let wpolicy = wrapper_policy(&probe.wrap_hash, &probe.hash, s.frame_src_open, s.bridge, fixture);
+                respond(200, "text/html; charset=utf-8", wrapper_html(&wcfg, fixture).into_bytes(), Some(wpolicy))
+            }
+            "/bridge" => {
+                let body: Value = serde_json::from_slice(request.body()).unwrap_or(Value::Null);
+                let origin = request.headers().get("origin").and_then(|h| h.to_str().ok()).map(str::to_owned);
+                let reply = bridge_answer(app, &label, &format!("scheme {}", request.method()), origin, &body);
+                respond(200, "application/json", serde_json::to_vec(&reply).unwrap(), None)
             }
             "/nav.html" => {
                 let route = query.strip_prefix("r=").unwrap_or("none").to_owned();
@@ -689,7 +800,7 @@ fn open_apps<R: Runtime>(app: &AppHandle<R>, s: &Spec) {
                     .title(format!("fixture {}", a.app))
                     .inner_size(640.0, 480.0)
                     .position(700.0 + 40.0 * i as f64, 40.0 + 40.0 * i as f64)
-                    .on_document_title_changed(move |_, title| on_title(&handle.state::<Probe>(), &title_label, &title));
+                    .on_document_title_changed(move |_, title| on_title_app(&handle, &title_label, &title));
                 let window = configure!(builder, app, s, label, own).build().expect("fixture window");
                 let h = app.clone();
                 let l = label.to_owned();
@@ -701,7 +812,7 @@ fn open_apps<R: Runtime>(app: &AppHandle<R>, s: &Spec) {
                     }
                 });
             }
-            Layout::Children => add_child(app, s, label, url, i, own, move |title| on_title(&handle.state::<Probe>(), &title_label, &title)),
+            Layout::Children => add_child(app, s, label, url, i, own, move |title| on_title_app(&handle, &title_label, &title)),
             Layout::Frames => {}
         }
         if s.frame_cancel {
@@ -890,6 +1001,21 @@ fn control<R: Runtime>(handle: AppHandle<R>) {
             }
         }
         Group::Hang => hang(&handle, &probe, &s),
+        Group::Bridge => {
+            let ok = wait_for(&probe, &app_keys(&s, "rt-done"), Duration::from_secs(90));
+            for a in &s.apps {
+                let ms = probe.ms();
+                let sent = eval_on(&handle, a.label, &format!("window.__bridgeEvent({})", json!({ "from": "host", "atMs": ms })));
+                probe.note(&format!("event.{}", a.app), json!({ "atMs": ms, "sent": sent }));
+            }
+            let done = wait_for(&probe, &app_keys(&s, "done"), Duration::from_secs(200));
+            std::thread::sleep(Duration::from_millis(1500));
+            for a in &s.apps {
+                let at = handle.get_webview(a.label).and_then(|w| w.url().ok()).map(|u| u.to_string());
+                probe.note(&format!("urlAfter.{}", a.app), json!(at));
+            }
+            ok && done
+        }
     };
     finish(&handle, complete);
 }
@@ -906,7 +1032,33 @@ fn hang<R: Runtime>(handle: &AppHandle<R>, probe: &Probe, s: &Spec) -> bool {
         eval_on(handle, s.apps[0].label, "window.__probeHang()")
     };
     probe.note("hang", json!({ "atMs": t_hang, "trigger": sent }));
-    std::thread::sleep(Duration::from_millis(if s.wrap { 5_000 } else { 10_000 }));
+    if s.bridge.is_some() {
+        std::thread::sleep(Duration::from_millis(1000));
+        let mut asked = vec![];
+        for (i, a) in s.apps.iter().enumerate() {
+            let id = 5000 + i as u64;
+            let at = probe.ms();
+            let sent = eval_on(handle, a.label, &format!("window.__bridgeHostRequest({id})"));
+            asked.push((a, id, at, sent));
+        }
+        let until = Instant::now() + Duration::from_millis(3000);
+        while Instant::now() < until {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        let replies = probe.inner.lock().unwrap().host_replies.clone();
+        let result: Vec<Value> = asked
+            .iter()
+            .map(|(a, id, at, sent)| {
+                let got = replies.iter().find(|r| r["id"].as_u64() == Some(*id) && r["label"].as_str() == Some(a.label)).and_then(|r| r["ms"].as_u64());
+                json!({ "app": a.app, "label": a.label, "sent": sent, "replied": got.is_some(), "replyMs": got.map(|g| g.saturating_sub(*at)), "timeoutMs": 3000 })
+            })
+            .collect();
+        probe.note("hostRequests", json!(result));
+        let elapsed = probe.ms().saturating_sub(t_hang);
+        std::thread::sleep(Duration::from_millis(5_000u64.saturating_sub(elapsed)));
+    } else {
+        std::thread::sleep(Duration::from_millis(if s.wrap { 5_000 } else { 10_000 }));
+    }
     let t_rm = probe.ms();
     let removal = if s.host_hang {
         json!({ "action": "none" })
@@ -946,10 +1098,10 @@ fn hang<R: Runtime>(handle: &AppHandle<R>, probe: &Probe, s: &Spec) -> bool {
     };
     std::thread::sleep(Duration::from_millis(2500));
     let t_end = probe.ms();
-    let (beats, doc, wrapper) = {
+    let (beats, doc, wrapper, other_doc, other_wrapper) = {
         let inner = probe.inner.lock().unwrap();
         let get = |k: &str| inner.doc_beats.get(k).cloned().unwrap_or_default();
-        (inner.heartbeats.clone(), get("A"), get("W"))
+        (inner.heartbeats.clone(), get("A"), get("W"), get("B"), get("WB"))
     };
     probe.note(
         "hangResult",
@@ -962,6 +1114,8 @@ fn hang<R: Runtime>(handle: &AppHandle<R>, probe: &Probe, s: &Spec) -> bool {
             "documentDuring": max_gap(&doc, t_hang, t_rm),
             "wrapperBefore": max_gap(&wrapper, t_hang.saturating_sub(1500), t_hang),
             "wrapperDuring": max_gap(&wrapper, t_hang, t_rm),
+            "otherDocumentDuring": max_gap(&other_doc, t_hang, t_rm),
+            "otherWrapperDuring": max_gap(&other_wrapper, t_hang, t_rm),
             "loopMs": t_rm - t_hang,
         }),
     );
@@ -997,7 +1151,7 @@ fn main() {
         .plugin(probe_plugin::init())
         .register_uri_scheme_protocol("appa", scheme_handler("A"))
         .register_uri_scheme_protocol("appb", scheme_handler("B"))
-        .invoke_handler(tauri::generate_handler![probe_mark, probe_config, probe_event, probe_heartbeat, probe_report])
+        .invoke_handler(tauri::generate_handler![probe_mark, probe_config, probe_event, probe_heartbeat, probe_report, bridge_call])
         .setup(move |app| {
             open_host(app.handle(), &s)?;
             let handle = app.handle().clone();

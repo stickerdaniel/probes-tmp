@@ -10,6 +10,10 @@ on:
         description: Space separated variants, empty for all
         required: false
         default: ""
+      profile:
+        description: Cargo profile, debug or release
+        required: false
+        default: debug
 permissions:
   contents: read
 jobs:
@@ -27,6 +31,7 @@ jobs:
     env:
       PROBE_SYSTEM: ${{ matrix.os }}
       VARIANTS: ${{ inputs.variants }}
+      PROBE_PROFILE: ${{ inputs.profile }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
@@ -52,14 +57,14 @@ jobs:
           cache-on-failure: true
       - name: Build
         working-directory: webview-policy/src-tauri
-        run: cargo build --locked --features custom-protocol,v4
+        run: cargo build --locked $([ "$PROBE_PROFILE" = release ] && echo --release) --features custom-protocol,v4
       - name: Build with the isolation pattern
-        run: ./iso-build.sh build
+        run: ./iso-build.sh build $([ "$PROBE_PROFILE" = release ] && echo --release)
       - name: Record runner and engine
         run: |
           mkdir -p "results/$PROBE_SYSTEM"
           {
-            echo "image_os=${ImageOS:-} image_version=${ImageVersion:-} runner_arch=${RUNNER_ARCH:-}"
+            echo "image_os=${ImageOS:-} image_version=${ImageVersion:-} runner_arch=${RUNNER_ARCH:-} profile=${PROBE_PROFILE}"
             uname -a
             rustc --version
             bun --version

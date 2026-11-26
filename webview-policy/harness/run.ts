@@ -9,8 +9,9 @@ const system = process.env.PROBE_SYSTEM ?? `${process.platform}-${process.arch}`
 const ALL = 'RF0 RF1 RF2 RF3 RF4 RF5 RW0 RW1 RW3 RW4 RW5 NW0 NW1 NC0 NC1 KF1 KF2 KFC XF1 XF2 XFC PF PW PWn SW SW#2 SC SC#2 SX SX#2 HX HF1 HF2 HW HC'
 const variants = (process.env.VARIANTS || ALL).split(/\s+/).filter(Boolean)
 const exeName = process.platform === 'win32' ? 'webview-policy.exe' : 'webview-policy'
-const exe = join(root, 'src-tauri', 'target', 'debug', exeName)
-const isoExe = join(root, 'src-tauri-iso', 'target', 'debug', exeName)
+const profile = process.env.PROBE_PROFILE || 'debug'
+const exe = join(root, 'src-tauri', 'target', profile, exeName)
+const isoExe = join(root, 'src-tauri-iso', 'target', profile, exeName)
 const outDir = join(root, 'results', system)
 mkdirSync(outDir, { recursive: true })
 
@@ -133,11 +134,12 @@ const json = (path: string) => (existsSync(path) ? JSON.parse(readFileSync(path,
 const tail = (path: string, n = 60) => (existsSync(path) ? readFileSync(path, 'utf8').split('\n').slice(-n) : [])
 
 for (const entry of variants) {
-  const [variant, launchText] = entry.split('#')
+  const [base, repText] = entry.split('@')
+  const [variant, launchText] = base.split('#')
   const launch = Number(launchText ?? '1')
-  const file = join(outDir, `${variant}${launch > 1 ? `-${launch}` : ''}.json`)
+  const file = join(outDir, `${variant}${launch > 1 ? `-${launch}` : ''}${repText ? `-r${repText}` : ''}.json`)
   if (onlyOn[variant] && onlyOn[variant] !== process.platform) {
-    writeFileSync(file, JSON.stringify({ system, variant, launch, notApplicable: `setting exists only on ${onlyOn[variant]}` }, null, 2))
+    writeFileSync(file, JSON.stringify({ system, variant, launch, rep: repText ?? null, notApplicable: `setting exists only on ${onlyOn[variant]}` }, null, 2))
     console.log(`${system} ${entry}: not applicable`)
     continue
   }
@@ -167,15 +169,18 @@ for (const entry of variants) {
         })
       : Promise.resolve([])
   let killed = false
-  const timer = setTimeout(() => ((killed = true), proc.kill()), 240_000)
+  const timer = setTimeout(() => ((killed = true), proc.kill()), 330_000)
   const exitCode = await proc.exited
   clearTimeout(timer)
   await Bun.sleep(1500)
   current = 'none'
+  const ended = Date.now()
   const result = {
     system,
     variant,
     launch,
+    rep: repText ?? null,
+    profile,
     nonce,
     startedAt: started,
     exitCode,
@@ -185,10 +190,11 @@ for (const entry of variants) {
     markers: lines(join(dir, 'marker.log')),
     trace: lines(join(dir, 'trace.jsonl')).filter((l) => l.t !== 'span' || String(l.name).includes('ipc')).slice(0, 400),
     scheme: lines(join(dir, 'scheme.log')),
-    sink: hits.filter((h) => h.variant === entry || h.firstLine.includes(`/e/${variant}/`)),
+    bridge: lines(join(dir, 'bridge.log')),
+    sink: hits.filter((h) => h.variant === entry || (h.variant === 'none' && h.t >= started && h.t <= ended && h.firstLine.includes(`/e/${variant}/`))),
     udp: datagrams.filter((d) => d.variant === entry),
     proxy: proxyHits.filter((h) => h.variant === entry),
-    dns: queries.filter((q) => q.t >= started && q.name.endsWith(`-${variant.toLowerCase()}.wp.test`)),
+    dns: queries.filter((q) => q.t >= started && q.t <= ended && q.name.endsWith(`-${variant.toLowerCase()}.wp.test`)),
     downloadFile: existsSync(join(dir, 'download.bin')),
     webviewProcesses: await processes,
     stderrTail: tail(join(dir, 'stderr.log')),

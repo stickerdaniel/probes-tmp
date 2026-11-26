@@ -1,0 +1,5 @@
+{
+  "identifier": "bridge",
+  "webviews": ["bc-a", "bc-b"],
+  "permissions": ["allow-bridge-call"]
+}

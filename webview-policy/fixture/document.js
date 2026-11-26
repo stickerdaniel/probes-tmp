@@ -252,7 +252,123 @@
     await send(`done-${phase}`, R)
   }
 
+  const bridgeCalls = () => {
+    let id = 0
+    const waiting = new Map()
+    const events = []
+    addEventListener('message', (e) => {
+      const d = e.data
+      if (e.source !== parent || !d) return
+      if ('bres' in d) {
+        const w = waiting.get(d.bres)
+        waiting.delete(d.bres)
+        if (w) w(d)
+      } else if (d.bevent) events.push({ ev: d.bevent, atMs: d.atMs, gotMs: Date.now() })
+      else if ('bhost' in d) request({ op: 'hostreply', id: d.bhost, tag: 'hostreply' }, 5000)
+    })
+    const request = (body, ms = 30000) =>
+      new Promise((resolve) => {
+        const k = ++id
+        const t0 = performance.now()
+        waiting.set(k, (d) => resolve({ reply: d.reply, error: d.error, ms: performance.now() - t0 }))
+        parent.postMessage({ probe: 1, app: cfg.app, kind: 'breq', id: k, body, ms }, '*')
+        setTimeout(() => waiting.delete(k) && resolve({ error: `no reply in ${ms + 2000} ms`, ms: ms + 2000 }), ms + 2000)
+      })
+    return { request, events }
+  }
+
+  async function nested() {
+    const body = (tag) => ({ op: 'ping', tag, app: cfg.sibling, origin: cfg.ownBase })
+    const r = {
+      grandparent: attempt(() => (parent.parent.postMessage({ probe: 1, app: cfg.sibling, kind: 'breq', id: 9001, body: body('nested-grandparent') }, '*'), 'posted')),
+      top: attempt(() => (top.postMessage({ probe: 1, app: cfg.sibling, kind: 'breq', id: 9002, body: body('nested-top') }, '*'), 'posted')),
+      report: attempt(() => (top.postMessage({ probe: 1, app: cfg.app, kind: 'done', data: { forgedReport: true } }, '*'), 'posted')),
+    }
+    parent.postMessage({ nested: r }, '*')
+  }
+
+  async function bridge() {
+    const { request, events } = bridgeCalls()
+    const R = { identity, rt: { ok: 0, failed: 0, ownIdentity: 0, otherIdentity: 0, ms: [], errors: [] } }
+    let streak = 0
+    for (let i = 0; i < 100 && streak < 3; i++) {
+      const claim = i % 2 === 1
+      const r = await request({ op: 'ping', tag: 'rt', n: i, ...(claim ? { app: cfg.sibling, origin: cfg.ownBase.replace(/appa|appb/, (m) => (m === 'appa' ? 'appb' : 'appa')) } : {}) }, 5000)
+      if (r.reply && r.reply.n === i) {
+        streak = 0
+        R.rt.ok++
+        R.rt.ms.push(Math.round(r.ms * 10) / 10)
+        if (r.reply.app === cfg.app) R.rt.ownIdentity++
+        else R.rt.otherIdentity++
+      } else {
+        streak++
+        R.rt.failed++
+        if (R.rt.errors.length < 5) R.rt.errors.push(r.error || str(JSON.stringify(r.reply)))
+      }
+    }
+    await send('rt-done', { ok: R.rt.ok })
+    const until = Date.now() + 20000
+    while (!events.length && Date.now() < until) await wait(50)
+    R.event = events.length ? { count: events.length, latencyMs: events[0].gotMs - events[0].atMs, ev: events[0].ev } : { count: 0, waitedMs: 20000 }
+    R.size = {}
+    for (const n of [1024, 65536, 1048576]) {
+      if (!R.rt.ok) {
+        R.size[n] = { skipped: 'no round trip succeeded' }
+        continue
+      }
+      const r = await request({ op: 'size', tag: `size-${n}`, data: 'a'.repeat(n), replySize: n }, 30000)
+      R.size[n] = r.reply ? { ok: r.reply.len === n && typeof r.reply.data === 'string' && r.reply.data.length === n, requestLen: r.reply.len, replyLen: r.reply.data && r.reply.data.length, ms: Math.round(r.ms) } : { ok: false, error: r.error, ms: Math.round(r.ms) }
+    }
+    const direct = (R.direct = {})
+    const bridgeUrl = `${cfg.ownBase}bridge`
+    direct.fetch = await settle(async () => {
+      const res = await fetch(bridgeUrl, { method: 'POST', headers: { 'Content-Type': 'text/plain' }, body: JSON.stringify({ op: 'ping', tag: 'direct-fetch' }) })
+      return `status ${res.status} ${(await res.text()).slice(0, 80)}`
+    }, 4000)
+    direct.fetchNoCors = await settle(async () => {
+      const res = await fetch(bridgeUrl, { method: 'POST', mode: 'no-cors', body: JSON.stringify({ op: 'ping', tag: 'direct-fetch-nocors' }) })
+      return `type ${res.type}`
+    }, 4000)
+    direct.beacon = attempt(() => navigator.sendBeacon(bridgeUrl, JSON.stringify({ op: 'ping', tag: 'direct-beacon' })))
+    direct.ownInternals = attempt(() => window.__TAURI_INTERNALS__.invoke)
+    const par = attempt(() => parent.__TAURI_INTERNALS__.invoke)
+    direct.parentInternals = par.ok && par.value === 'function' ? await settle(() => parent.__TAURI_INTERNALS__.invoke('bridge_call', { body: { op: 'ping', tag: 'direct-parent-internals' } }), 5000) : par
+    const keys = { none: `fixture-key-${tag}`, leaked: cfg.leakedKey }
+    let cbn = 3300000000 + 1000 * Math.floor(Math.random() * 1000)
+    const raw = (km) => JSON.stringify({ cmd: 'bridge_call', callback: cbn++, error: cbn++, payload: { body: { op: 'ping', tag: `direct-ipc-${km}` } }, options: {}, __TAURI_INVOKE_KEY__: keys[km] })
+    const endpoints = { webkit: () => window.webkit.messageHandlers.ipc, chrome: () => window.chrome.webview, ipc: () => window.ipc }
+    for (const [name, get] of Object.entries(endpoints)) {
+      for (const km of ['none', 'leaked']) {
+        const ep = attempt(get)
+        direct[`${name}-${km}`] = ep.ok && ep.value === 'object' ? attempt(() => (get().postMessage(raw(km)), 'sent')) : { skipped: ep.ok ? ep.value : ep.error }
+      }
+    }
+    const brq = `BRQ|900|0|1|${btoa(JSON.stringify({ op: 'ping', tag: 'direct-title' }))}`
+    direct.parentTitle = attempt(() => ((parent.document.title = brq), 'wrote'))
+    direct.ownTitle = attempt(() => ((document.title = brq), 'wrote'))
+    direct.topLocation = attempt(() => ((top.location.href = `${cfg.ownBase}wrap.html?r=direct-top`), 'assigned'))
+    await wait(1500)
+    const relay = (R.relay = {})
+    const nestedReply = new Promise((resolve) => {
+      addEventListener('message', (e) => e.data && e.data.nested && resolve(e.data.nested))
+      setTimeout(() => resolve('no reply in 4000 ms'), 4000)
+    })
+    const html = document.documentElement.outerHTML.replace('"mode":"frame"', '"mode":"nested"')
+    relay.nestedFrame = await settle(async () => {
+      const f = await childFrame((el) => (el.srcdoc = html))
+      return f ? `frame ${str(f.src || 'srcdoc')}` : 'no frame'
+    }, 3000)
+    relay.nested = await nestedReply
+    relay.popup = attempt(() => String(window.open(`${cfg.ownBase}wrap.html?r=popup`)))
+    const forged = await request({ op: 'ping', tag: 'forged-origin', n: -1, app: cfg.sibling, origin: 'http://forged.example' }, 5000)
+    relay.forgedField = forged.reply ? { replyApp: forged.reply.app, ownApp: cfg.app } : { error: forged.error }
+    await wait(1500)
+    R.violations = violations.slice(0, 30)
+    await send('done', R)
+  }
+
   async function hang() {
+    if (cfg.bridge) bridgeCalls()
     let beat = 0
     setInterval(() => {
       beat++
@@ -334,7 +450,8 @@
     document.title = `NAV|${route}|${r.ok ? 'ok' : r.error}`
   }
 
-  const groups = { Rtc: rtc, Ipc: ipc, Assets: assets, Storage: storage, Hang: hang, Nav: nav }
+  const groups = { Rtc: rtc, Ipc: ipc, Assets: assets, Storage: storage, Hang: hang, Nav: nav, Bridge: bridge }
+  if (cfg.mode === 'nested') return nested()
   try {
     await groups[cfg.group]()
   } catch (e) {

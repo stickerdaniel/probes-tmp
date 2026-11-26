@@ -10,4 +10,5 @@ rm src-tauri-iso/Cargo.toml.bak
 grep -q '"tracing", "isolation"' src-tauri-iso/Cargo.toml
 grep -q 'features = \["isolation"\]' src-tauri-iso/Cargo.toml
 cd src-tauri-iso
-TAURI_CONFIG='{"app":{"security":{"pattern":{"use":"isolation","options":{"dir":"../isolation"}}}}}' cargo "${1:-build}" --locked --features custom-protocol,v4,iso
+[ $# -gt 0 ] || set -- build
+TAURI_CONFIG='{"app":{"security":{"pattern":{"use":"isolation","options":{"dir":"../isolation"}}}}}' cargo "$@" --locked --features custom-protocol,v4,iso

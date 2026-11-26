@@ -1,7 +1,7 @@
 fn main() {
     tauri_build::try_build(
         tauri_build::Attributes::new()
-            .app_manifest(tauri_build::AppManifest::new().commands(&["probe_mark", "probe_config", "probe_event", "probe_heartbeat", "probe_report"]))
+            .app_manifest(tauri_build::AppManifest::new().commands(&["probe_mark", "probe_config", "probe_event", "probe_heartbeat", "probe_report", "bridge_call"]))
             .plugin(
                 "probe",
                 tauri_build::InlinedPlugin::new()
