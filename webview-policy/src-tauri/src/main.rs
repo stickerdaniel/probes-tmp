@@ -27,7 +27,9 @@ const NAV_ROUTES: [&str; 8] = ["topnav", "assign", "link", "form-self", "form-bl
 const NAV2_ROUTES: [&str; 14] = [
     "assign", "replace", "link", "form-self", "form-blank", "form-top", "form-parent", "meta", "open", "download", "nested", "assign-dns", "link-dns", "nested-dns",
 ];
-const DEFAULT_ARGS: &str = "--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection";
+const DEFAULT_ARGS: &str = "--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection --autoplay-policy=no-user-gesture-required";
+const HOST_RULES: &str = r#"--host-resolver-rules="MAP * ~NOTFOUND , EXCLUDE localhost , EXCLUDE *.localhost""#;
+const FEATURE_ARGS: &str = "--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection,LoadingPredictorUseLocalPredictions,LoadingPredictorUseOptimizationGuide,NavigationPredictor,PreconnectManagerDirectFastPath,SearchEnginePreconnect2,SpeculativeServiceWorkerWarmUp --autoplay-policy=no-user-gesture-required";
 const WEBRTC_ARG: &str = "--force-webrtc-ip-handling-policy=disable_non_proxied_udp";
 const INIT_SCRIPT: &str = r#"(() => {
   const names = ['RTCPeerConnection', 'webkitRTCPeerConnection', 'RTCDataChannel', 'RTCSessionDescription', 'RTCIceCandidate', 'RTCRtpSender', 'RTCRtpReceiver', 'RTCRtpTransceiver', 'RTCDtlsTransport', 'RTCIceTransport', 'RTCSctpTransport', 'RTCCertificate', 'RTCPeerConnectionIceEvent', 'RTCDataChannelEvent', 'RTCTrackEvent', 'RTCError', 'RTCErrorEvent', 'RTCStatsReport', 'RTCDTMFSender', 'RTCEncodedAudioFrame', 'RTCEncodedVideoFrame', 'RTCRtpScriptTransform']
@@ -63,6 +65,15 @@ enum Policy {
 }
 
 #[derive(Clone, Copy, PartialEq)]
+enum Args {
+    Stock,
+    Hosts,
+    Proxy,
+    Both,
+    Features,
+}
+
+#[derive(Clone, Copy, PartialEq)]
 enum Source {
     Srcdoc,
     Scheme,
@@ -94,6 +105,8 @@ struct Spec {
     wrap: bool,
     frame_src_open: bool,
     frame_sandbox: &'static str,
+    args: Args,
+    frame_cancel: bool,
 }
 
 fn spec(name: &str) -> Spec {
@@ -111,6 +124,8 @@ fn spec(name: &str) -> Spec {
         wrap: false,
         frame_src_open: false,
         frame_sandbox: "allow-scripts",
+        args: Args::Stock,
+        frame_cancel: false,
     };
     let srcdoc = |app| Frame { app, sandbox: "allow-scripts", source: Source::Srcdoc };
     let scheme = |app| Frame { app, sandbox: "allow-scripts", source: Source::Scheme };
@@ -151,6 +166,21 @@ fn spec(name: &str) -> Spec {
         "HX" => Spec { host_hang: true, ..base(Group::Hang, Layout::Frames) },
         "N2C" => w2(Group::Nav, Layout::Children, vec![win("A", "app-a")]),
         "N2W" => w2(Group::Nav, Layout::Windows, vec![win("A", "app-a")]),
+        "N2CH" => Spec { args: Args::Hosts, ..w2(Group::Nav, Layout::Children, vec![win("A", "app-a")]) },
+        "N2WH" => Spec { args: Args::Hosts, ..w2(Group::Nav, Layout::Windows, vec![win("A", "app-a")]) },
+        "N2CP" => Spec { args: Args::Proxy, ..w2(Group::Nav, Layout::Children, vec![win("A", "app-a")]) },
+        "N2WP" => Spec { args: Args::Proxy, ..w2(Group::Nav, Layout::Windows, vec![win("A", "app-a")]) },
+        "N2CB" => Spec { args: Args::Both, ..w2(Group::Nav, Layout::Children, vec![win("A", "app-a")]) },
+        "N2WB" => Spec { args: Args::Both, ..w2(Group::Nav, Layout::Windows, vec![win("A", "app-a")]) },
+        "N2CF" => Spec { args: Args::Features, ..w2(Group::Nav, Layout::Children, vec![win("A", "app-a")]) },
+        "N2WF" => Spec { args: Args::Features, ..w2(Group::Nav, Layout::Windows, vec![win("A", "app-a")]) },
+        "N2CN" => Spec { frame_cancel: true, ..w2(Group::Nav, Layout::Children, vec![win("A", "app-a")]) },
+        "N2WN" => Spec { frame_cancel: true, ..w2(Group::Nav, Layout::Windows, vec![win("A", "app-a")]) },
+        "R2CH" => Spec { args: Args::Hosts, ..w2(Group::Rtc, Layout::Children, vec![win("A", "app-a")]) },
+        "R2CP" => Spec { args: Args::Proxy, ..w2(Group::Rtc, Layout::Children, vec![win("A", "app-a")]) },
+        "R2CB" => Spec { args: Args::Both, ..w2(Group::Rtc, Layout::Children, vec![win("A", "app-a")]) },
+        "R2CF" => Spec { args: Args::Features, ..w2(Group::Rtc, Layout::Children, vec![win("A", "app-a")]) },
+        "R2CN" => Spec { frame_cancel: true, ..w2(Group::Rtc, Layout::Children, vec![win("A", "app-a")]) },
         "N2CC" => Spec { frame_src_open: true, ..w2(Group::Nav, Layout::Children, vec![win("A", "app-a")]) },
         "N2CO" => Spec { frame_src_open: true, nav_guard: false, ..w2(Group::Nav, Layout::Children, vec![win("A", "app-a")]) },
         "N2WO" => Spec { frame_src_open: true, nav_guard: false, ..w2(Group::Nav, Layout::Windows, vec![win("A", "app-a")]) },
@@ -510,7 +540,61 @@ fn scheme_handler<R: Runtime>(
 }
 
 fn browser_args(s: &Spec) -> Option<String> {
-    s.webrtc_arg.then(|| format!("{DEFAULT_ARGS} {WEBRTC_ARG}"))
+    let proxy = || {
+        let port = std::env::var("PROBE_PROXY").unwrap_or_else(|_| "9".into());
+        format!(r#"--proxy-server=http://127.0.0.1:{port} --proxy-bypass-list="<-loopback>;*.localhost""#)
+    };
+    let extra = match s.args {
+        Args::Stock => return s.webrtc_arg.then(|| format!("{DEFAULT_ARGS} {WEBRTC_ARG}")),
+        Args::Features => return Some(FEATURE_ARGS.to_owned()),
+        Args::Hosts => HOST_RULES.to_owned(),
+        Args::Proxy => proxy(),
+        Args::Both => format!("{HOST_RULES} {}", proxy()),
+    };
+    Some(format!("{DEFAULT_ARGS} {extra}"))
+}
+
+#[cfg(windows)]
+fn cancel_frame_navigations<R: Runtime>(app: &AppHandle<R>, label: &str, own: String) {
+    use webview2_com::{take_pwstr, NavigationStartingEventHandler};
+    let Some(webview) = app.get_webview(label) else {
+        app.state::<Probe>().note("frameCancel", json!("no webview"));
+        return;
+    };
+    let (h1, h2) = (app.clone(), app.clone());
+    let l = label.to_owned();
+    let sent = webview.with_webview(move |pw| {
+        let result = unsafe {
+            pw.controller().CoreWebView2().and_then(|core| {
+                let mut token = 0i64;
+                core.add_FrameNavigationStarting(
+                    &NavigationStartingEventHandler::create(Box::new(move |_, args| {
+                        let Some(args) = args else { return Ok(()) };
+                        let mut uri = windows_core::PWSTR::null();
+                        args.Uri(&mut uri)?;
+                        let uri = take_pwstr(uri);
+                        let allow = uri.starts_with(&own) || uri.starts_with("about:");
+                        args.SetCancel(!allow)?;
+                        let p = h1.state::<Probe>();
+                        let ms = p.ms();
+                        p.inner.lock().unwrap().navigations.push(json!({ "webview": l, "url": uri, "allow": allow, "frame": true, "ms": ms }));
+                        Ok(())
+                    })),
+                    &mut token,
+                )
+            })
+        };
+        let p = h2.state::<Probe>();
+        p.note("frameCancel", json!(result.map(|_| "registered".to_owned()).unwrap_or_else(|e| format!("error {e}"))));
+    });
+    if let Err(e) = sent {
+        app.state::<Probe>().note("frameCancel", json!(format!("with_webview error {e}")));
+    }
+}
+
+#[cfg(not(windows))]
+fn cancel_frame_navigations<R: Runtime>(app: &AppHandle<R>, _: &str, _: String) {
+    app.state::<Probe>().note("frameCancel", json!("not on this platform"));
 }
 
 #[cfg(target_os = "macos")]
@@ -619,6 +703,9 @@ fn open_apps<R: Runtime>(app: &AppHandle<R>, s: &Spec) {
             }
             Layout::Children => add_child(app, s, label, url, i, own, move |title| on_title(&handle.state::<Probe>(), &title_label, &title)),
             Layout::Frames => {}
+        }
+        if s.frame_cancel {
+            cancel_frame_navigations(app, label, own_base(a.scheme_app));
         }
     }
 }

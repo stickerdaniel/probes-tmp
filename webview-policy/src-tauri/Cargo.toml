@@ -19,6 +19,10 @@ tracing-subscriber = { version = "=0.3.23", default-features = false, features =
 objc2 = "=0.6.5"
 objc2-web-kit = { version = "=0.3.2", default-features = false, features = ["std", "objc2-app-kit", "WKWebViewConfiguration", "WKPreferences"] }
 
+[target.'cfg(windows)'.dependencies]
+webview2-com = "=0.39.1"
+windows-core = "=0.62.2"
+
 [features]
 custom-protocol = ["tauri/custom-protocol"]
 v4 = ["tauri/unstable"]

@@ -88,6 +88,28 @@ if (dnsServer && checkCmd[process.platform]) {
   console.log(`dns check ${checkName}: exit ${c.exitCode}, queries ${queries.filter((q) => q.name === checkName).length}`)
 }
 
+const proxyHits: { t: number; variant: string; firstLine: string }[] = []
+const proxy = createServer((socket: Socket) => {
+  const variant = current
+  let buf = ''
+  let done = false
+  const finish = () => {
+    if (done) return
+    done = true
+    proxyHits.push({ t: Date.now(), variant, firstLine: buf.split('\r\n')[0] ?? '' })
+    socket.destroy()
+  }
+  socket.on('data', (d) => {
+    buf += d.toString('latin1')
+    if (buf.includes('\r\n')) finish()
+  })
+  socket.on('error', finish)
+  socket.on('close', finish)
+  socket.setTimeout(1000, finish)
+})
+await new Promise<void>((r) => proxy.listen(0, '127.0.0.1', r))
+const proxyPort = (proxy.address() as { port: number }).port
+
 const udps: UdpSocket[] = []
 const stunPorts: number[] = []
 for (const route of ROUTES) {
@@ -132,7 +154,7 @@ for (const entry of variants) {
   const started = Date.now()
   const proc = Bun.spawn([binary], {
     cwd: dir,
-    env: { ...process.env, PROBE_VARIANT: variant, PROBE_LAUNCH: String(launch), PROBE_DIR: dir, PROBE_SINK: `http://127.0.0.1:${sinkPort}`, PROBE_STUN: stunPorts.join(','), PROBE_NONCE: nonce },
+    env: { ...process.env, PROBE_VARIANT: variant, PROBE_LAUNCH: String(launch), PROBE_DIR: dir, PROBE_SINK: `http://127.0.0.1:${sinkPort}`, PROBE_STUN: stunPorts.join(','), PROBE_NONCE: nonce, PROBE_PROXY: String(proxyPort) },
     stdout: Bun.file(join(dir, 'stdout.log')),
     stderr: Bun.file(join(dir, 'stderr.log')),
   })
@@ -165,6 +187,7 @@ for (const entry of variants) {
     scheme: lines(join(dir, 'scheme.log')),
     sink: hits.filter((h) => h.variant === entry || h.firstLine.includes(`/e/${variant}/`)),
     udp: datagrams.filter((d) => d.variant === entry),
+    proxy: proxyHits.filter((h) => h.variant === entry),
     dns: queries.filter((q) => q.t >= started && q.name.endsWith(`-${variant.toLowerCase()}.wp.test`)),
     downloadFile: existsSync(join(dir, 'download.bin')),
     webviewProcesses: await processes,
@@ -177,6 +200,7 @@ for (const entry of variants) {
 writeFileSync(join(outDir, 'unattributed-sink.json'), JSON.stringify(hits.filter((h) => h.variant === 'none'), null, 2))
 writeFileSync(join(outDir, 'dns-all.json'), JSON.stringify(queries, null, 2))
 dnsServer?.close()
+proxy.close()
 sink.close()
 for (const u of udps) u.close()
 process.exit(0)

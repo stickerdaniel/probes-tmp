@@ -4,6 +4,7 @@
   const invoke = (cmd, args) => window.__TAURI_INTERNALS__.invoke(cmd, args)
   const event = (app, kind, data) => invoke('probe_event', { app, kind, data }).catch(() => {})
   const cfg = await invoke('probe_config')
+  event('host', 'info', { href: location.href, readyMs: Math.round(performance.now()) })
 
   if (cfg.group === 'Hang') setInterval(() => invoke('probe_heartbeat').catch(() => {}), 100)
 
