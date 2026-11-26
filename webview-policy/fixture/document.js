@@ -277,8 +277,16 @@
       await send('navready-none', { identity })
       return
     }
+    if (framed) {
+      addEventListener('message', (e) => {
+        if (e.data && e.data.probePing) parent.postMessage({ probe: 1, app: cfg.app, kind: 'pong', data: { route, href: str(location.href) } }, '*')
+      })
+    }
     await wait(300)
-    const u = sink(`nav-${route}`)
+    const dns = route.endsWith('-dns')
+    const kind = dns ? route.slice(0, -4) : route
+    const base = dns ? cfg.sink.replace('127.0.0.1', `${kind}-${cfg.variant.toLowerCase()}.wp.test`) : cfg.sink
+    const u = `${base}/e/${cfg.variant}/${cfg.app}/nav-${route}`
     const form = (target) => {
       const f = document.createElement('form')
       f.method = 'post'
@@ -302,6 +310,14 @@
     const routes = {
       topnav: () => (top.location.href = u),
       assign: () => location.assign(u),
+      replace: () => location.replace(u),
+      'form-top': () => form('_top'),
+      'form-parent': () => form('_parent'),
+      nested: () => {
+        const f = document.createElement('iframe')
+        f.src = u
+        document.body.appendChild(f)
+      },
       link: () => click(false),
       'form-self': () => form('_self'),
       'form-blank': () => form('_blank'),
@@ -314,7 +330,7 @@
       open: () => window.open(u),
       download: () => click(true),
     }
-    const r = attempt(routes[route])
+    const r = attempt(routes[kind])
     document.title = `NAV|${route}|${r.ok ? 'ok' : r.error}`
   }
 

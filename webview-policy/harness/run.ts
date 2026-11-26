@@ -17,7 +17,7 @@ mkdirSync(outDir, { recursive: true })
 const onlyOn: Record<string, string> = { RF4: 'win32', RW4: 'win32', RF5: 'darwin', RW5: 'darwin' }
 const ROUTES = ['direct', 'saved', 'webkit', 'blank', 'srcdoc', 'open', 'worker']
 
-type Hit = { t: number; variant: string; firstLine: string; upgrade: boolean }
+type Hit = { t: number; variant: string; firstLine: string; host: string | null; upgrade: boolean }
 const hits: Hit[] = []
 const datagrams: { t: number; variant: string; route: string; bytes: number }[] = []
 let current = 'none'
@@ -29,7 +29,7 @@ const sink = createServer((socket: Socket) => {
   const finish = () => {
     if (done) return
     done = true
-    hits.push({ t: Date.now(), variant, firstLine: buf.split('\r\n')[0] ?? '', upgrade: /\r\nupgrade:\s*websocket/i.test(buf) })
+    hits.push({ t: Date.now(), variant, firstLine: buf.split('\r\n')[0] ?? '', host: /\r\nhost:\s*([^\r\n]+)/i.exec(buf)?.[1] ?? null, upgrade: /\r\nupgrade:\s*websocket/i.test(buf) })
   }
   socket.on('data', (d) => {
     buf += d.toString('latin1')
@@ -45,6 +45,48 @@ const sink = createServer((socket: Socket) => {
 })
 await new Promise<void>((r) => sink.listen(0, '127.0.0.1', r))
 const sinkPort = (sink.address() as { port: number }).port
+
+type Query = { t: number; name: string; qtype: number }
+const queries: Query[] = []
+const dnsPort = Number(process.env.PROBE_DNS_PORT ?? '0')
+const dnsServer = dnsPort ? createSocket('udp4') : null
+if (dnsServer) {
+  dnsServer.on('message', (msg, rinfo) => {
+    let off = 12
+    const labels: string[] = []
+    while (off < msg.length && msg[off]) {
+      labels.push(msg.subarray(off + 1, off + 1 + msg[off]).toString('latin1'))
+      off += msg[off] + 1
+    }
+    off++
+    const qtype = msg.readUInt16BE(off)
+    const name = labels.join('.').toLowerCase()
+    queries.push({ t: Date.now(), name, qtype })
+    const ours = name === 'wp.test' || name.endsWith('.wp.test')
+    const answer = ours && qtype === 1
+    const header = Buffer.alloc(12)
+    msg.copy(header, 0, 0, 2)
+    header.writeUInt16BE(0x8480 | (msg.readUInt16BE(2) & 0x0100) | (ours ? 0 : 3), 2)
+    header.writeUInt16BE(1, 4)
+    header.writeUInt16BE(answer ? 1 : 0, 6)
+    const rr = answer ? Buffer.from([0xc0, 0x0c, 0, 1, 0, 1, 0, 0, 0, 5, 0, 4, 127, 0, 0, 1]) : Buffer.alloc(0)
+    dnsServer.send(Buffer.concat([header, msg.subarray(12, off + 4), rr]), rinfo.port, rinfo.address)
+  })
+  await new Promise<void>((r) => dnsServer.bind(dnsPort, '127.0.0.1', r))
+}
+const checkName = `check-${process.platform}.wp.test`
+const checkCmd: Record<string, string[]> = {
+  darwin: ['dscacheutil', '-q', 'host', '-a', 'name', checkName],
+  linux: ['getent', 'hosts', checkName],
+  win32: ['powershell', '-NoProfile', '-Command', `Resolve-DnsName ${checkName} -Type A -DnsOnly | Format-List | Out-String`],
+}
+if (dnsServer && checkCmd[process.platform]) {
+  const c = Bun.spawn(checkCmd[process.platform], { stdout: 'pipe', stderr: 'pipe' })
+  const out = (await new Response(c.stdout).text()) + (await new Response(c.stderr).text())
+  await c.exited
+  writeFileSync(join(outDir, 'dns-check.json'), JSON.stringify({ name: checkName, command: checkCmd[process.platform], exitCode: c.exitCode, output: out.trim().slice(0, 2000), queries: queries.filter((q) => q.name === checkName) }, null, 2))
+  console.log(`dns check ${checkName}: exit ${c.exitCode}, queries ${queries.filter((q) => q.name === checkName).length}`)
+}
 
 const udps: UdpSocket[] = []
 const stunPorts: number[] = []
@@ -103,7 +145,7 @@ for (const entry of variants) {
         })
       : Promise.resolve([])
   let killed = false
-  const timer = setTimeout(() => ((killed = true), proc.kill()), 180_000)
+  const timer = setTimeout(() => ((killed = true), proc.kill()), 240_000)
   const exitCode = await proc.exited
   clearTimeout(timer)
   await Bun.sleep(1500)
@@ -123,6 +165,7 @@ for (const entry of variants) {
     scheme: lines(join(dir, 'scheme.log')),
     sink: hits.filter((h) => h.variant === entry || h.firstLine.includes(`/e/${variant}/`)),
     udp: datagrams.filter((d) => d.variant === entry),
+    dns: queries.filter((q) => q.t >= started && q.name.endsWith(`-${variant.toLowerCase()}.wp.test`)),
     downloadFile: existsSync(join(dir, 'download.bin')),
     webviewProcesses: await processes,
     stderrTail: tail(join(dir, 'stderr.log')),
@@ -132,6 +175,8 @@ for (const entry of variants) {
 }
 
 writeFileSync(join(outDir, 'unattributed-sink.json'), JSON.stringify(hits.filter((h) => h.variant === 'none'), null, 2))
+writeFileSync(join(outDir, 'dns-all.json'), JSON.stringify(queries, null, 2))
+dnsServer?.close()
 sink.close()
 for (const u of udps) u.close()
 process.exit(0)

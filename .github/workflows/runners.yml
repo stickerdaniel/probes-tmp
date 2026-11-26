@@ -79,6 +79,26 @@ jobs:
                 ;;
             esac
           } 2>&1 | tee "results/$PROBE_SYSTEM/system.txt"
+      - name: Route the test domain to the logging resolver
+        run: |
+          case "$RUNNER_OS" in
+            Linux)
+              sudo mkdir -p /etc/systemd/resolved.conf.d
+              printf '[Resolve]\nDNS=127.0.0.1:5300\nDomains=~wp.test\n' | sudo tee /etc/systemd/resolved.conf.d/wp.conf
+              sudo systemctl restart systemd-resolved
+              echo "PROBE_DNS_PORT=5300" >> "$GITHUB_ENV"
+              ;;
+            macOS)
+              sudo mkdir -p /etc/resolver
+              printf 'nameserver 127.0.0.1\nport 5300\n' | sudo tee /etc/resolver/wp.test
+              sudo killall -HUP mDNSResponder || true
+              echo "PROBE_DNS_PORT=5300" >> "$GITHUB_ENV"
+              ;;
+            Windows)
+              powershell -NoProfile -Command "Add-DnsClientNrptRule -Namespace '.wp.test' -NameServers '127.0.0.1'; Clear-DnsClientCache; Get-DnsClientNrptRule | Format-List | Out-String"
+              echo "PROBE_DNS_PORT=53" >> "$GITHUB_ENV"
+              ;;
+          esac
       - name: Probe on Linux
         if: runner.os == 'Linux'
         run: dbus-run-session -- xvfb-run -a -s "-screen 0 1920x1080x24" bun harness/run.ts 2>&1 | tee "results/$PROBE_SYSTEM/run.log"

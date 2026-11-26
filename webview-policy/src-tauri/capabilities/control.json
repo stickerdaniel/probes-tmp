@@ -1,0 +1,5 @@
+{
+  "identifier": "control",
+  "webviews": ["ctl-a"],
+  "permissions": ["allow-probe-mark", "probe:default"]
+}

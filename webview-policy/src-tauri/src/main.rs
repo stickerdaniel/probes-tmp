@@ -20,9 +20,13 @@ use tauri::{
 };
 
 static FIXTURE_JS: LazyLock<String> = LazyLock::new(|| include_str!("../../fixture/document.js").replace("\r\n", "\n"));
-const DEADLINE: Duration = Duration::from_secs(150);
+static WRAPPER_JS: LazyLock<String> = LazyLock::new(|| include_str!("../../fixture/wrapper.js").replace("\r\n", "\n"));
+const DEADLINE: Duration = Duration::from_secs(200);
 const WEBRTC_ROUTES: [&str; 7] = ["direct", "saved", "webkit", "blank", "srcdoc", "open", "worker"];
 const NAV_ROUTES: [&str; 8] = ["topnav", "assign", "link", "form-self", "form-blank", "meta", "open", "download"];
+const NAV2_ROUTES: [&str; 14] = [
+    "assign", "replace", "link", "form-self", "form-blank", "form-top", "form-parent", "meta", "open", "download", "nested", "assign-dns", "link-dns", "nested-dns",
+];
 const DEFAULT_ARGS: &str = "--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection";
 const WEBRTC_ARG: &str = "--force-webrtc-ip-handling-policy=disable_non_proxied_udp";
 const INIT_SCRIPT: &str = r#"(() => {
@@ -87,6 +91,9 @@ struct Spec {
     no_peer: bool,
     nav_guard: bool,
     host_hang: bool,
+    wrap: bool,
+    frame_src_open: bool,
+    frame_sandbox: &'static str,
 }
 
 fn spec(name: &str) -> Spec {
@@ -101,6 +108,9 @@ fn spec(name: &str) -> Spec {
         no_peer: false,
         nav_guard: false,
         host_hang: false,
+        wrap: false,
+        frame_src_open: false,
+        frame_sandbox: "allow-scripts",
     };
     let srcdoc = |app| Frame { app, sandbox: "allow-scripts", source: Source::Srcdoc };
     let scheme = |app| Frame { app, sandbox: "allow-scripts", source: Source::Scheme };
@@ -108,6 +118,7 @@ fn spec(name: &str) -> Spec {
     let frames = |group, f: Vec<Frame>| Spec { frames: f, ..base(group, Layout::Frames) };
     let windows = |group, a: Vec<App>| Spec { apps: a, ..base(group, Layout::Windows) };
     let children = |group, a: Vec<App>| Spec { apps: a, ..base(group, Layout::Children) };
+    let w2 = |group, layout, a: Vec<App>| Spec { apps: a, wrap: true, init_all_frames: true, nav_guard: true, ..base(group, layout) };
     match name {
         "RF0" => frames(Group::Rtc, vec![srcdoc("A")]),
         "RF1" => Spec { policy: Policy::WebrtcBlock, ..frames(Group::Rtc, vec![srcdoc("A")]) },
@@ -138,6 +149,30 @@ fn spec(name: &str) -> Spec {
         "HW" => windows(Group::Hang, vec![win("A", "app-a")]),
         "HC" => children(Group::Hang, vec![win("A", "app-a")]),
         "HX" => Spec { host_hang: true, ..base(Group::Hang, Layout::Frames) },
+        "N2C" => w2(Group::Nav, Layout::Children, vec![win("A", "app-a")]),
+        "N2W" => w2(Group::Nav, Layout::Windows, vec![win("A", "app-a")]),
+        "N2CC" => Spec { frame_src_open: true, ..w2(Group::Nav, Layout::Children, vec![win("A", "app-a")]) },
+        "N2CO" => Spec { frame_src_open: true, nav_guard: false, ..w2(Group::Nav, Layout::Children, vec![win("A", "app-a")]) },
+        "N2WO" => Spec { frame_src_open: true, nav_guard: false, ..w2(Group::Nav, Layout::Windows, vec![win("A", "app-a")]) },
+        "R2C0" => Spec { init_all_frames: false, ..w2(Group::Rtc, Layout::Children, vec![win("A", "app-a")]) },
+        "R2C1" => w2(Group::Rtc, Layout::Children, vec![win("A", "app-a")]),
+        "R2W0" => Spec { init_all_frames: false, ..w2(Group::Rtc, Layout::Windows, vec![win("A", "app-a")]) },
+        "R2W1" => w2(Group::Rtc, Layout::Windows, vec![win("A", "app-a")]),
+        "H2C" => w2(Group::Hang, Layout::Children, vec![win("A", "app-a")]),
+        "H2W" => w2(Group::Hang, Layout::Windows, vec![win("A", "app-a")]),
+        "K2C" | "X2C" => w2(Group::Ipc, Layout::Children, vec![win("A", "app-a")]),
+        "K2W" | "X2W" => w2(Group::Ipc, Layout::Windows, vec![win("A", "app-a")]),
+        "K2CC" | "X2CC" => Spec {
+            frame_src_open: true,
+            frame_sandbox: "allow-scripts allow-same-origin",
+            ..w2(Group::Ipc, Layout::Children, vec![win("A", "ctl-a")])
+        },
+        "S2C" => w2(Group::Storage, Layout::Children, vec![win("A", "app-a"), win("B", "app-b")]),
+        "S2W" => w2(Group::Storage, Layout::Windows, vec![win("A", "app-a"), win("B", "app-b")]),
+        "S2X" => Spec {
+            frame_sandbox: "allow-scripts allow-same-origin",
+            ..w2(Group::Storage, Layout::Windows, vec![win("A", "app-a"), App { app: "B", label: "app-b", scheme_app: "A" }])
+        },
         other => panic!("unknown PROBE_VARIANT {other}"),
     }
 }
@@ -150,6 +185,7 @@ struct Probe {
     stun: Map<String, Value>,
     nonce: String,
     hash: String,
+    wrap_hash: String,
     started: Instant,
     inner: Mutex<Inner>,
 }
@@ -222,10 +258,35 @@ fn policy_text(policy: Policy, hash: &str, app: &str) -> Option<String> {
     }
 }
 
+fn wrapper_policy(wrapper: &str, document: &str, open: bool) -> String {
+    let frames = if open { "* isolation: http://isolation.localhost" } else { "'none'" };
+    format!("default-src 'none'; script-src '{wrapper}' '{document}'; frame-src {frames}; child-src {frames}")
+}
+
+fn wrapper_html(cfg: &Value, app: &str) -> String {
+    let cfg = cfg.to_string().replace('<', "\\u003c");
+    format!(
+        r#"<!doctype html><html><head><meta charset="utf-8"><title>wrapper {app}</title></head><body><script type="application/json" id="probe-cfg">{cfg}</script><script>{js}</script></body></html>"#,
+        js = *WRAPPER_JS
+    )
+}
+
+fn next_phase(probe: &Probe, fixture: &str) -> String {
+    let mut inner = probe.inner.lock().unwrap();
+    let n = inner.loads.entry(fixture.to_owned()).or_insert(0);
+    *n += 1;
+    match (probe.launch, *n) {
+        (1, 1) => "write".to_owned(),
+        (1, k) => format!("reload{}", k - 1),
+        (l, k) => format!("launch{l}load{k}"),
+    }
+}
+
 fn label_app(label: &str) -> Option<&'static str> {
     match label {
         "app-a" => Some("A"),
         "app-b" => Some("B"),
+        "ctl-a" => Some("A"),
         _ => None,
     }
 }
@@ -421,18 +482,18 @@ fn scheme_handler<R: Runtime>(
         let mode = if label == "main" { "frame" } else { "window" };
         match path.as_str() {
             "/index.html" => {
-                let phase = {
-                    let mut inner = probe.inner.lock().unwrap();
-                    let n = inner.loads.entry(fixture.to_owned()).or_insert(0);
-                    *n += 1;
-                    match (probe.launch, *n) {
-                        (1, 1) => "write".to_owned(),
-                        (1, k) => format!("reload{}", k - 1),
-                        (l, k) => format!("launch{l}load{k}"),
-                    }
-                };
+                let phase = next_phase(&probe, fixture);
                 let cfg = fixture_cfg(app, &probe, fixture, mode, json!({ "phase": phase }));
                 respond(200, "text/html; charset=utf-8", fixture_html(&cfg, None, fixture).into_bytes(), policy)
+            }
+            "/wrap.html" => {
+                let route = query.strip_prefix("r=").unwrap_or("none").to_owned();
+                let phase = next_phase(&probe, fixture);
+                let fcfg = fixture_cfg(app, &probe, fixture, "frame", json!({ "route": route, "phase": phase }));
+                let fpolicy = policy_text(Policy::Base, &probe.hash, fixture);
+                let srcdoc = fixture_html(&fcfg, fpolicy.as_deref(), fixture);
+                let wcfg = json!({ "app": fixture, "group": format!("{:?}", s.group), "variant": probe.variant, "route": route, "phase": phase, "srcdoc": srcdoc, "sandbox": s.frame_sandbox });
+                respond(200, "text/html; charset=utf-8", wrapper_html(&wcfg, fixture).into_bytes(), Some(wrapper_policy(&probe.wrap_hash, &probe.hash, s.frame_src_open)))
             }
             "/nav.html" => {
                 let route = query.strip_prefix("r=").unwrap_or("none").to_owned();
@@ -481,14 +542,16 @@ macro_rules! configure {
         if s.no_peer {
             b = b.with_webview_configuration(no_peer_config(&$app.state::<Probe>()));
         }
-        if s.group == Group::Nav {
+        if s.group == Group::Nav || s.wrap {
             let guard = s.nav_guard;
+            let wrap = s.wrap;
             let own: Option<String> = $own;
             let (h1, h2, h3) = ($app.clone(), $app.clone(), $app.clone());
             let label = $label.to_owned();
             let (l1, l2) = (label.clone(), label.clone());
             b = b.on_navigation(move |url| {
-                let allow = !guard || own.as_deref().is_some_and(|o| url.as_str().starts_with(o));
+                let app_owned = wrap && (url.scheme() == "about" || url.scheme() == "isolation" || url.host_str() == Some("isolation.localhost"));
+                let allow = !guard || app_owned || own.as_deref().is_some_and(|o| url.as_str().starts_with(o));
                 let p = h1.state::<Probe>();
                 let ms = p.ms();
                 p.inner.lock().unwrap().navigations.push(json!({ "webview": l1, "url": url.as_str(), "allow": allow, "ms": ms }));
@@ -520,7 +583,12 @@ macro_rules! configure {
 }
 
 fn app_url(s: &Spec, a: &App) -> WebviewUrl {
-    let page = if s.group == Group::Nav { "nav.html?r=none" } else { "index.html" };
+    let page = match (s.wrap, s.group == Group::Nav) {
+        (true, true) => "wrap.html?r=none",
+        (true, false) => "wrap.html",
+        (false, true) => "nav.html?r=none",
+        (false, false) => "index.html",
+    };
     WebviewUrl::CustomProtocol(format!("{}{page}", own_base(a.scheme_app)).parse().unwrap())
 }
 
@@ -704,14 +772,15 @@ fn control<R: Runtime>(handle: AppHandle<R>) {
         Group::Nav => {
             let label = s.apps[0].label;
             let ok = wait_for(&probe, &app_keys(&s, "navready-none"), Duration::from_secs(30));
-            for route in NAV_ROUTES {
-                let url: tauri::Url = format!("{}nav.html?r={route}", own_base(s.apps[0].scheme_app)).parse().unwrap();
+            let (routes, page, pause): (&[&str], &str, u64) = if s.wrap { (&NAV2_ROUTES, "wrap.html", 5000) } else { (&NAV_ROUTES, "nav.html", 3500) };
+            for route in routes {
+                let url: tauri::Url = format!("{}{page}?r={route}", own_base(s.apps[0].scheme_app)).parse().unwrap();
                 let started = probe.ms();
                 let sent = match handle.get_webview(label) {
                     Some(w) => w.navigate(url).map(|_| "sent".to_owned()).unwrap_or_else(|e| format!("error {e}")),
                     None => "no webview".into(),
                 };
-                std::thread::sleep(Duration::from_millis(3500));
+                std::thread::sleep(Duration::from_millis(pause));
                 let at = handle.get_webview(label).and_then(|w| w.url().ok()).map(|u| u.to_string());
                 probe.note(&format!("route.{route}"), json!({ "startedMs": started, "navigate": sent, "urlAfter": at }));
             }
@@ -750,7 +819,7 @@ fn hang<R: Runtime>(handle: &AppHandle<R>, probe: &Probe, s: &Spec) -> bool {
         eval_on(handle, s.apps[0].label, "window.__probeHang()")
     };
     probe.note("hang", json!({ "atMs": t_hang, "trigger": sent }));
-    std::thread::sleep(Duration::from_millis(10_000));
+    std::thread::sleep(Duration::from_millis(if s.wrap { 5_000 } else { 10_000 }));
     let t_rm = probe.ms();
     let removal = if s.host_hang {
         json!({ "action": "none" })
@@ -790,19 +859,23 @@ fn hang<R: Runtime>(handle: &AppHandle<R>, probe: &Probe, s: &Spec) -> bool {
     };
     std::thread::sleep(Duration::from_millis(2500));
     let t_end = probe.ms();
-    let (beats, doc) = {
+    let (beats, doc, wrapper) = {
         let inner = probe.inner.lock().unwrap();
-        (inner.heartbeats.clone(), inner.doc_beats.get("A").cloned().unwrap_or_default())
+        let get = |k: &str| inner.doc_beats.get(k).cloned().unwrap_or_default();
+        (inner.heartbeats.clone(), get("A"), get("W"))
     };
     probe.note(
         "hangResult",
         json!({
-            "during": max_gap(&beats, t_hang, t_hang + 10_000),
+            "during": max_gap(&beats, t_hang, t_rm),
             "afterRemoval": max_gap(&beats, t_rm, t_end),
             "removal": removal,
             "beforeHang": max_gap(&beats, t_hang.saturating_sub(1500), t_hang),
             "documentBefore": max_gap(&doc, t_hang.saturating_sub(1500), t_hang),
-            "documentDuring": max_gap(&doc, t_hang, t_hang + 10_000),
+            "documentDuring": max_gap(&doc, t_hang, t_rm),
+            "wrapperBefore": max_gap(&wrapper, t_hang.saturating_sub(1500), t_hang),
+            "wrapperDuring": max_gap(&wrapper, t_hang, t_rm),
+            "loopMs": t_rm - t_hang,
         }),
     );
     ok
@@ -824,6 +897,7 @@ fn main() {
         stun,
         nonce: std::env::var("PROBE_NONCE").unwrap_or_else(|_| "n0".into()),
         hash,
+        wrap_hash: format!("sha256-{}", base64::engine::general_purpose::STANDARD.encode(Sha256::digest(WRAPPER_JS.as_bytes()))),
         started: Instant::now(),
         inner: Mutex::new(Inner::default()),
     };
