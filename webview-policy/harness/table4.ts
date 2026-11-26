@@ -107,7 +107,12 @@ const navCounts = (r: Json) => {
   const notesR = r.report?.notes ?? {}
   const starts = ROUTES.map((route) => ({ route, at: r.startedAt + (notesR[`route.${route}`]?.startedMs ?? 0) })).sort((a, b) => a.at - b.at)
   const at = (line: string, t: number) => /\/nav-([a-z-]+)/.exec(line)?.[1] ?? starts.filter((s) => s.at <= t).at(-1)?.route
-  const c: Record<string, { req: number; tcp: number; dns: number; replaced: number; reports: number }> = Object.fromEntries(ROUTES.map((x) => [x, { req: 0, tcp: 0, dns: 0, replaced: 0, reports: 0 }]))
+  const c: Record<string, { req: number; tcp: number; dns: number; proxy: number; replaced: number; reports: number }> = Object.fromEntries(ROUTES.map((x) => [x, { req: 0, tcp: 0, dns: 0, proxy: 0, replaced: 0, reports: 0 }]))
+  for (const h of r.proxy ?? []) {
+    if (h.firstLine && !/127\.0\.0\.1|wp\.test/.test(h.firstLine)) continue
+    const route = at(h.firstLine ?? '', h.t)
+    if (route && c[route]) c[route].proxy++
+  }
   for (const h of r.sink ?? []) {
     const route = at(h.firstLine ?? '', h.t)
     if (!route || !c[route]) continue
@@ -126,19 +131,19 @@ const navCounts = (r: Json) => {
     }
   }
   return Object.fromEntries(
-    Object.entries(GROUPS).map(([g, routes]) => [g, routes.reduce((a, x) => ({ req: a.req + c[x].req, tcp: a.tcp + c[x].tcp, dns: a.dns + c[x].dns, replaced: a.replaced + c[x].replaced, reports: a.reports + c[x].reports }), { req: 0, tcp: 0, dns: 0, replaced: 0, reports: 0 })]),
+    Object.entries(GROUPS).map(([g, routes]) => [g, routes.reduce((a, x) => ({ req: a.req + c[x].req, tcp: a.tcp + c[x].tcp, dns: a.dns + c[x].dns, proxy: a.proxy + c[x].proxy, replaced: a.replaced + c[x].replaced, reports: a.reports + c[x].reports }), { req: 0, tcp: 0, dns: 0, proxy: 0, replaced: 0, reports: 0 })]),
   )
 }
 const navCell = (r: Json | null) => {
   if (!r?.report) return Object.keys(GROUPS).map(() => (r ? 'no report' : 'no result'))
   const c = navCounts(r)
-  return Object.keys(GROUPS).map((g) => `${c[g].req}/${c[g].tcp}/${c[g].dns}, replaced ${c[g].replaced} of ${c[g].reports}`)
+  return Object.keys(GROUPS).map((g) => `${c[g].req}/${c[g].tcp}/${c[g].dns}/${c[g].proxy}, replaced ${c[g].replaced} of ${c[g].reports}`)
 }
 const stderrLines = (r: Json | null) => [...new Set((r?.stderrTail ?? []).map((l: string) => l.trim()).filter((l: string) => l && !/AT-SPI|DRI3|libEGL/.test(l)))].map((l) => String(l).replace(/^\[[^\]]*\]\s*/, '').slice(0, 140))
 
 const closure = (dirs: string[], title: string, prefix: string) => {
   out.push('', `## ${title}`, '')
-  out.push('Cells: sink requests / sink TCP without request / resolver queries.', '')
+  out.push('Cells: sink requests / sink TCP without request / resolver queries / proxy connections.', '')
   out.push('| Engine | Candidate | Layer 1 | IP literal, 6 routes | host name, 3 routes | sandbox-closed, 5 routes | STUN datagrams (R3) | Host page |')
   out.push('| --- | --- | --- | --- | --- | --- | --- | --- |')
   for (const dir of dirs) {
@@ -185,7 +190,7 @@ if (sets.bridge.length) {
 
 if (sets.repeat.length) {
   out.push('', '## Navigating rows of sections 7 and 8, three launches each', '')
-  out.push('Cells: sink requests / sink TCP without request / resolver queries.', '')
+  out.push('Cells: sink requests / sink TCP without request / resolver queries / proxy connections.', '')
   out.push('| Engine | Variant | Launch | IP literal, 6 routes | host name, 3 routes | sandbox-closed, 5 routes |')
   out.push('| --- | --- | --- | --- | --- | --- |')
   for (const dir of sets.repeat) {
