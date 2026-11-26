@@ -42,22 +42,32 @@ const rtc = (r: Json): { open: boolean; note: string } => {
   const routes = Object.entries(counts).map(([k, v]) => `${k} ${v}`).join(', ')
   const init = R?.identity?.init?.value
   const peer = r.report?.notes?.peerConnectionEnabled
-  const extra = [init && init !== 'undefined' ? 'init script ran' : null, peer ? `_peerConnectionEnabled ${peer.before} to ${peer.after}` : null].filter(Boolean).join(', ')
+  const args = (r.webviewProcesses ?? []).some((l: string) => l.includes('force-webrtc-ip-handling-policy')) ? 'switch present in the browser process command line' : null
+  const extra = [init && init !== 'undefined' ? 'init script ran' : null, peer ? `_peerConnectionEnabled ${peer.before} to ${peer.after}` : null, args].filter(Boolean).join(', ')
   return { open: total > 0, note: `${total} STUN datagrams${routes ? ` (${routes})` : ''}; constructors: ${ctors}${extra ? `; ${extra}` : ''}` }
 }
 
 const nav = (r: Json): { open: boolean; note: string } => {
   const counts: Record<string, number> = {}
+  let bare = 0
+  let other = 0
   for (const h of r.sink ?? []) {
     const m = /\/nav-([a-z-]+)/.exec(h.firstLine ?? '')
     if (m) counts[m[1]] = (counts[m[1]] ?? 0) + 1
+    else if (!h.firstLine) bare++
+    else other++
   }
   const total = Object.values(counts).reduce((a, b) => a + b, 0)
+  const notes = r.report?.notes ?? {}
+  const replaced = Object.entries(notes).filter(([k, v]: [string, any]) => k.startsWith('route.') && !/^(appa:|http:\/\/appa\.localhost)/.test(String(v.urlAfter))).map(([k]) => k.slice(6))
   const blocked = (r.report?.navigations ?? []).filter((n: Json) => n.allow === false).length
   const routes = Object.entries(counts).map(([k, v]) => `${k} ${v}`).join(', ')
   const dl = (r.report?.downloads ?? []).length
   const nw = (r.report?.newWindows ?? []).length
-  return { open: total > 0, note: `${total} sink connections${routes ? ` (${routes})` : ''}; on_navigation denied ${blocked}, on_new_window calls ${nw}, on_download calls ${dl}` }
+  return {
+    open: total + bare + other > 0,
+    note: `document replaced on ${replaced.length} of 8 routes${replaced.length ? ` (${replaced.join(', ')})` : ''}; ${total} requests with the route path${routes ? ` (${routes})` : ''}, ${other} other requests, ${bare} TCP connections without a request; on_navigation denied ${blocked}, on_new_window calls ${nw}, on_download calls ${dl}${r.downloadFile ? ', file downloaded' : ''}`,
+  }
 }
 
 const ipc = (r: Json): { open: boolean; note: string; hostOk: boolean } => {
@@ -103,14 +113,17 @@ const storage = (system: string, v: string): Cell => {
   return { state: cross ? 'open' : 'closed', note: reads.join('; ') }
 }
 
-const hang = (r: Json): { open: boolean; note: string; gap: number } => {
+const hang = (r: Json): { open: boolean; note: string; gap: number } | Cell => {
   const h = r.report?.notes?.hangResult
-  if (!h) return { open: false, gap: -1, note: 'no hang result' }
+  if (!h) return { state: 'not measured', note: 'no hang result' }
+  const doc = h.documentDuring
+  if (r.variant !== 'HX' && doc && doc.beats > 0) return { state: 'not measured', note: `document kept beating (${doc.beats} beats), so it did not hang` }
   const gap = h.during?.maxGapMs ?? -1
   const after = h.afterRemoval?.maxGapMs
   const rm = h.removal ?? {}
   const rmText = rm.action === 'none' ? '' : `; ${rm.action} ${rm.completed ? `done in ${rm.doneMs} ms` : 'not completed in 10 s'}`
-  return { open: gap > 1000, gap, note: `longest host heartbeat gap ${gap} ms during 10 s, ${after} ms after removal${rmText}` }
+  const docText = r.variant === 'HX' || !doc ? '' : `; document beats during the loop ${doc.beats}`
+  return { open: gap > 1000, gap, note: `longest host heartbeat gap ${gap} ms during 10 s, ${after} ms after removal${rmText}${docText}` }
 }
 
 type Row = { row: string; container: string; setting: string; variant: string; control: string }
