@@ -8,7 +8,7 @@ const runKey = "Software\\Microsoft\\Windows\\CurrentVersion\\Run";
 
 function registryState(hive: "CurrentUser" | "LocalMachine") {
   const read = Bun.spawnSync(["powershell.exe", "-NoProfile", "-NonInteractive", "-Command",
-    `$ErrorActionPreference='Stop'; $key=[Microsoft.Win32.Registry]::${hive}.OpenSubKey('${runKey}'); if ($key) { ConvertTo-Json -InputObject ($key.GetValue('${appId}')) -Compress } else { 'null' }`]);
+    `$ErrorActionPreference='Stop'; $key=[Microsoft.Win32.Registry]::${hive}.OpenSubKey('${runKey}'); $value=$null; if ($key) { $value=$key.GetValue('${appId}'); $key.Dispose() }; if ($null -eq $value) { 'null' } else { ConvertTo-Json -InputObject $value -Compress }`]);
   assert.equal(read.exitCode, 0, read.stderr.toString());
   return JSON.parse(read.stdout.toString().trim()) as string | null;
 }

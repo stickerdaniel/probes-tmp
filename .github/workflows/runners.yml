@@ -26,8 +26,16 @@ jobs:
       - name: Linux dependencies
         if: runner.os == 'Linux'
         run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev xvfb xauth dbus-x11
+          apt_options=(-o Acquire::Retries=1 -o Acquire::http::Timeout=25 -o Acquire::https::Timeout=25)
+          if [[ -f /etc/apt/sources.list.d/ubuntu.sources ]]; then
+            apt_options+=(-o Dir::Etc::sourcelist=/etc/apt/sources.list.d/ubuntu.sources -o Dir::Etc::sourceparts=-)
+          fi
+          sudo apt-get "${apt_options[@]}" update
+          sudo apt-get "${apt_options[@]}" install -y --no-install-recommends libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev xvfb xauth dbus-x11
+      - uses: Swatinem/rust-cache@2201cc584a476d1b508be977bbe4b7d1c7a52e9c
+        with:
+          workspaces: shell-control/src-tauri -> target
+          cache-on-failure: true
       - run: bun install --frozen-lockfile --ignore-scripts --registry https://registry.npmjs.org
       - name: Record runner and package
         run: |
