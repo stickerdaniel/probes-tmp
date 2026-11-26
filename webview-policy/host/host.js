@@ -5,6 +5,11 @@
   const event = (app, kind, data) => invoke('probe_event', { app, kind, data }).catch(() => {})
   const cfg = await invoke('probe_config')
   event('host', 'info', { href: location.href, readyMs: Math.round(performance.now()) })
+  if (cfg.pattern === 'isolation') {
+    for (let i = 0; i < 50 && !document.querySelector('iframe#__tauri_isolation__'); i++) await wait(100)
+    const iso = document.querySelector('iframe#__tauri_isolation__')
+    event('host', 'isolation', { src: iso ? iso.src : null })
+  }
 
   if (cfg.group === 'Hang') setInterval(() => invoke('probe_heartbeat').catch(() => {}), 100)
 

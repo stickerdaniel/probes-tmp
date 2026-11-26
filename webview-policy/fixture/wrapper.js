@@ -31,6 +31,10 @@
   }
   const frame = document.createElement('iframe')
   frame.setAttribute('sandbox', cfg.sandbox)
+  if (cfg.group === 'Docs') {
+    document.body.style.margin = '0'
+    frame.style.cssText = 'position:fixed;inset:0;width:100%;height:100%;border:0'
+  }
   frame.srcdoc = cfg.srcdoc
   let loads = 0
   let pong = null
@@ -54,7 +58,7 @@
       new Promise((resolve) => {
         const id = ++seq
         pending.set(id, resolve)
-        const parts = chunks(encode(body), 3000)
+        const parts = chunks(encode(body), 900)
         titled(parts.map((c, i) => `BRQ|${id}|${i}|${parts.length}|${c}`), 20)
       }),
   }
@@ -103,6 +107,7 @@
   window.__bridgeEvent = (ev) => toFrame({ bevent: ev, atMs: Date.now() })
   window.__bridgeHostRequest = (id) => toFrame({ bhost: id })
   window.__probeHang = () => frame.contentWindow.postMessage({ probeHang: 1 }, '*')
+  window.__probeDocsReport = () => frame.contentWindow.postMessage({ probeDocsReport: 1 }, '*')
   document.body.appendChild(frame)
   if (cfg.group === 'Hang') {
     let beat = 0

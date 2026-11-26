@@ -10,9 +10,9 @@ const ALL = 'RF0 RF1 RF2 RF3 RF4 RF5 RW0 RW1 RW3 RW4 RW5 NW0 NW1 NC0 NC1 KF1 KF2
 const variants = (process.env.VARIANTS || ALL).split(/\s+/).filter(Boolean)
 const exeName = process.platform === 'win32' ? 'webview-policy.exe' : 'webview-policy'
 const profile = process.env.PROBE_PROFILE || 'debug'
-const exe = join(root, 'src-tauri', 'target', profile, exeName)
-const isoExe = join(root, 'src-tauri-iso', 'target', profile, exeName)
-const outDir = join(root, 'results', system)
+const exe = process.env.PROBE_EXE || join(root, 'src-tauri', 'target', profile, exeName)
+const isoExe = process.env.PROBE_ISO_EXE || join(root, 'src-tauri-iso', 'target', profile, exeName)
+const outDir = process.env.PROBE_OUT || join(root, 'results', system)
 mkdirSync(outDir, { recursive: true })
 
 const onlyOn: Record<string, string> = { RF4: 'win32', RW4: 'win32', RF5: 'darwin', RW5: 'darwin' }
@@ -149,7 +149,23 @@ for (const entry of variants) {
     console.log(`${system} ${entry}: binary missing`)
     continue
   }
-  if (launch === 1) for (const d of dataDirs()) rmSync(d, { recursive: true, force: true })
+  const busy: string[] = []
+  if (launch === 1) {
+    for (const d of dataDirs()) {
+      for (let attempt = 0; ; attempt++) {
+        try {
+          rmSync(d, { recursive: true, force: true })
+          break
+        } catch (e) {
+          if (attempt >= 20) {
+            busy.push(`${d}: ${String(e).slice(0, 120)}`)
+            break
+          }
+          await Bun.sleep(1000)
+        }
+      }
+    }
+  }
   const dir = mkdtempSync(join(tmpdir(), `probe-${variant}-`))
   const nonce = `${variant}-${launch}-${Date.now().toString(36)}`
   current = entry
@@ -181,6 +197,7 @@ for (const entry of variants) {
     launch,
     rep: repText ?? null,
     profile,
+    dataDirsBusy: busy,
     nonce,
     startedAt: started,
     exitCode,
@@ -189,6 +206,7 @@ for (const entry of variants) {
     report: json(join(dir, 'report.json')),
     markers: lines(join(dir, 'marker.log')),
     trace: lines(join(dir, 'trace.jsonl')).filter((l) => l.t !== 'span' || String(l.name).includes('ipc')).slice(0, 400),
+    ipcPosts: lines(join(dir, 'trace.jsonl')).filter((l) => l.t === 'span' && l.name === 'ipc::request' && l.fields?.kind === 'post-message').map((l) => ({ uri: l.fields.uri, request: String(l.fields.request ?? '').slice(0, 240) })),
     scheme: lines(join(dir, 'scheme.log')),
     bridge: lines(join(dir, 'bridge.log')),
     sink: hits.filter((h) => h.variant === entry || (h.variant === 'none' && h.t >= started && h.t <= ended && h.firstLine.includes(`/e/${variant}/`))),

@@ -43,7 +43,7 @@ const sizeCell = (x: Json | undefined) => (!x ? 'no report' : x.skipped ? 'skipp
 
 const directTags = (r: Json) => (r.bridge ?? []).filter((b: Json) => /^(direct|nested)-/.test(String(b.tag ?? '')))
 const layerTwoIpc = (r: Json) =>
-  (r.trace ?? []).filter((t: Json) => t.t === 'span' && t.name === 'ipc::request' && t.fields?.kind === 'post-message' && /direct-ipc|bridge_call/.test(String(t.fields?.request ?? '')) && !/customProtocolIpcBlocked/.test(String(t.fields?.request ?? '')))
+  (r.ipcPosts ?? (r.trace ?? []).filter((t: Json) => t.t === 'span' && t.name === 'ipc::request' && t.fields?.kind === 'post-message').map((t: Json) => ({ uri: t.fields.uri, request: String(t.fields.request ?? '') }))).filter((t: Json) => /direct-ipc/.test(t.request))
 
 const out: string[] = []
 const notes: string[] = []
@@ -73,7 +73,7 @@ if (sets.bridge.length) {
         const d = A.direct ?? {}
         const brief = (x: Json | undefined) => (!x ? 'n/a' : x.skipped ? `skipped (${String(x.skipped).slice(0, 50)})` : x.timeout ? `timeout ${x.timeout} ms` : x.ok ? String(typeof x.value === 'object' ? JSON.stringify(x.value) : x.value).slice(0, 60) : String(x.error).slice(0, 90))
         notes.push(
-          `- ${engine(dir)} ${v}: fetch ${brief(d.fetch)}; no-cors fetch ${brief(d.fetchNoCors)}; beacon ${brief(d.beacon)}; parent internals ${brief(d.parentInternals)}; webkit none ${brief(d['webkit-none'])}, leaked ${brief(d['webkit-leaked'])}; chrome none ${brief(d['chrome-none'])}, leaked ${brief(d['chrome-leaked'])}; parent title ${brief(d.parentTitle)}; top location ${brief(d.topLocation)}; nested frame ${brief(A.relay?.nestedFrame)}; popup ${brief(A.relay?.popup)}; dropped kinds ${dropped.map((x: Json) => `${x.kind}:${x.tag ?? ''}`).join(' ') || 'none'}; handler direct tags ${direct.map((x: Json) => `${x.tag} via ${x.via}`).join(', ') || 'none'}; layer 2 IPC posts ${posts.map((t: Json) => String(t.fields.uri)).join(', ') || 'none'}; url after ${JSON.stringify(r.report?.notes?.['urlAfter.A'] ?? null)}; rt errors ${JSON.stringify(A.rt.errors ?? []).slice(0, 160)}; violations ${(A.violations ?? []).length}`,
+          `- ${engine(dir)} ${v}: fetch ${brief(d.fetch)}; no-cors fetch ${brief(d.fetchNoCors)}; beacon ${brief(d.beacon)}; parent internals ${brief(d.parentInternals)}; webkit none ${brief(d['webkit-none'])}, leaked ${brief(d['webkit-leaked'])}; chrome none ${brief(d['chrome-none'])}, leaked ${brief(d['chrome-leaked'])}; parent title ${brief(d.parentTitle)}; top location ${brief(d.topLocation)}; nested frame ${brief(A.relay?.nestedFrame)}; popup ${brief(A.relay?.popup)}; dropped kinds ${dropped.map((x: Json) => `${x.kind}:${x.tag ?? ''}`).join(' ') || 'none'}; handler direct tags ${direct.map((x: Json) => `${x.tag} via ${x.via}`).join(', ') || 'none'}; layer 2 IPC posts ${posts.map((t: Json) => String(t.uri)).join(', ') || 'none'}; url after ${JSON.stringify(r.report?.notes?.['urlAfter.A'] ?? null)}; rt errors ${JSON.stringify(A.rt.errors ?? []).slice(0, 160)}; violations ${(A.violations ?? []).length}`,
         )
       }
     }

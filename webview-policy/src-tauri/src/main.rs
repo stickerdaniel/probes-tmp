@@ -4,7 +4,7 @@ mod trace;
 
 use base64::Engine;
 use serde_json::{json, Map, Value};
-use sha2::{Digest, Sha256};
+use sha2::{Digest, Sha256, Sha384, Sha512};
 use std::{
     collections::HashMap,
     fs::OpenOptions,
@@ -31,6 +31,45 @@ const DEFAULT_ARGS: &str = "--disable-features=msWebOOUI,msPdfOOUI,msSmartScreen
 const HOST_RULES: &str = r#"--host-resolver-rules="MAP * ~NOTFOUND , EXCLUDE localhost , EXCLUDE *.localhost""#;
 const FEATURE_ARGS: &str = "--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection,LoadingPredictorUseLocalPredictions,LoadingPredictorUseOptimizationGuide,NavigationPredictor,PreconnectManagerDirectFastPath,SearchEnginePreconnect2,SpeculativeServiceWorkerWarmUp --autoplay-policy=no-user-gesture-required";
 const WEBRTC_ARG: &str = "--force-webrtc-ip-handling-policy=disable_non_proxied_udp";
+const UNTHROTTLE_ARGS: &str = "--disable-background-timer-throttling --disable-renderer-backgrounding --disable-backgrounding-occluded-windows";
+const STYLE_SOURCES: &str = "style-src 'unsafe-inline'; img-src data:";
+const PNG_DATA: &str = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAMAAAACCAYAAACddGYaAAAAEUlEQVR4nGP4z8DwH4YZYBwAeuoJ9xhXr8AAAAAASUVORK5CYII=";
+const DOCS_INIT: &str = r#"(() => {
+  if (location.href !== 'about:srcdoc') return
+  const violations = []
+  const errors = []
+  document.addEventListener('securitypolicyviolation', (e) => violations.push({ directive: e.effectiveDirective, uri: String(e.blockedURI).slice(0, 100), sample: String(e.sample || '').slice(0, 60), line: e.lineNumber }))
+  addEventListener('error', (e) => errors.push(String(e.message || (e.target && e.target.tagName) || 'error').slice(0, 200)), true)
+  addEventListener('unhandledrejection', (e) => errors.push(`rejection ${String((e.reason && e.reason.message) || e.reason).slice(0, 200)}`))
+  const report = () => {
+    const vw = innerWidth
+    const vh = innerHeight
+    const inView = (r) => r.width > 0 && r.height > 0 && r.bottom > 0 && r.right > 0 && r.top < vh && r.left < vw
+    let boxes = 0
+    for (const el of document.body ? document.body.querySelectorAll('*') : []) {
+      const cs = getComputedStyle(el)
+      if (cs.visibility !== 'hidden' && cs.display !== 'none' && inView(el.getBoundingClientRect())) boxes++
+    }
+    let text = 0
+    const walker = document.createTreeWalker(document.body || document, NodeFilter.SHOW_TEXT)
+    for (let n = walker.nextNode(); n; n = walker.nextNode()) {
+      const t = n.textContent.trim()
+      if (!t) continue
+      const range = document.createRange()
+      range.selectNodeContents(n)
+      if ([...range.getClientRects()].some(inView)) text += t.length
+    }
+    const sheets = [...document.styleSheets].map((sh) => { try { return sh.cssRules.length } catch (e) { return -1 } })
+    const scripts = [...document.scripts].map((sc) => ({ src: sc.src ? 'external' : 'inline', type: sc.type || 'classic' }))
+    const byDirective = {}
+    for (const v of violations) byDirective[v.directive] = (byDirective[v.directive] || 0) + 1
+    const headings = [...document.querySelectorAll('h1,h2,h3')].map((h) => h.textContent.trim().slice(0, 60))
+    parent.postMessage({ probe: 1, app: 'A', kind: 'done', data: { viewport: [vw, vh], boxes, text, sheets, scripts, byDirective, violations: violations.slice(0, 30), errors: errors.slice(0, 20), headings: headings.slice(0, 6), background: document.body ? getComputedStyle(document.body).backgroundColor : null, scrollHeight: document.documentElement.scrollHeight, hostCalls: window.__hostCalls || null, loaded: window.__probeLoaded, sample: document.body ? document.body.innerText.slice(0, 200) : '' } }, '*')
+  }
+  let loaded = false
+  addEventListener('load', () => (loaded = true))
+  addEventListener('message', (e) => e.source === parent && e.data && e.data.probeDocsReport && ((window.__probeLoaded = loaded), report()))
+})()"#;
 const INIT_SCRIPT: &str = r#"(() => {
   const names = ['RTCPeerConnection', 'webkitRTCPeerConnection', 'RTCDataChannel', 'RTCSessionDescription', 'RTCIceCandidate', 'RTCRtpSender', 'RTCRtpReceiver', 'RTCRtpTransceiver', 'RTCDtlsTransport', 'RTCIceTransport', 'RTCSctpTransport', 'RTCCertificate', 'RTCPeerConnectionIceEvent', 'RTCDataChannelEvent', 'RTCTrackEvent', 'RTCError', 'RTCErrorEvent', 'RTCStatsReport', 'RTCDTMFSender', 'RTCEncodedAudioFrame', 'RTCEncodedVideoFrame', 'RTCRtpScriptTransform']
   for (const n of names) {
@@ -48,6 +87,20 @@ enum Group {
     Storage,
     Hang,
     Bridge,
+    Style,
+    Hashes,
+    Surface,
+    Memory,
+    Docs,
+}
+
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum Surface {
+    Visible,
+    Hidden,
+    Zero,
+    Offscreen,
+    HiddenChild,
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -72,6 +125,75 @@ enum Args {
     Proxy,
     Both,
     Features,
+}
+
+fn csp_hash(alg: &str, text: &str) -> String {
+    let b = text.as_bytes();
+    let digest = match alg {
+        "sha384" => Sha384::digest(b).to_vec(),
+        "sha512" => Sha512::digest(b).to_vec(),
+        _ => Sha256::digest(b).to_vec(),
+    };
+    format!("{alg}-{}", base64::engine::general_purpose::STANDARD.encode(digest))
+}
+
+fn inline_scripts(html: &str) -> Vec<String> {
+    let lower = html.to_ascii_lowercase();
+    let mut out = vec![];
+    let mut at = 0;
+    while let Some(start) = lower[at..].find("<script").map(|i| i + at) {
+        let Some(tag_end) = lower[start..].find('>').map(|i| i + start + 1) else { break };
+        let Some(close) = lower[tag_end..].find("</script").map(|i| i + tag_end) else { break };
+        let attrs = &lower[start + 7..tag_end - 1];
+        let ty = attrs.split("type=").nth(1).map(|t| t.trim_start_matches(['"', '\'']).split(['"', '\'', ' ']).next().unwrap_or("").to_owned());
+        let executes = ty.as_deref().is_none_or(|t| t.is_empty() || t == "module" || t.contains("javascript") || t.contains("ecmascript"));
+        if executes && !attrs.contains("src=") {
+            out.push(html[tag_end..close].replace("\r\n", "\n").replace('\r', "\n"));
+        }
+        at = close + 8;
+    }
+    out
+}
+
+fn after_head(html: &str) -> usize {
+    let lower = html.to_ascii_lowercase();
+    if let Some(h) = lower.find("<head") {
+        if let Some(e) = lower[h..].find('>') {
+            return h + e + 1;
+        }
+    }
+    if lower.trim_start().starts_with("<!doctype") {
+        return lower.find('>').map(|e| e + 1).unwrap_or(0);
+    }
+    0
+}
+
+const HASH_SCRIPTS: [(&str, &str, &str); 8] = [
+    ("s1-sha256", "sha256", "window.__ran=window.__ran||[];__ran.push('s1-sha256')"),
+    ("s2-sha384", "sha384", "window.__ran=window.__ran||[];__ran.push('s2-sha384')"),
+    ("s3-sha512", "sha512", "window.__ran=window.__ran||[];__ran.push('s3-sha512')"),
+    ("s4-unhashed", "none", "window.__ran=window.__ran||[];__ran.push('s4-unhashed')"),
+    ("s5-crlf-raw", "raw", "window.__ran=window.__ran||[];\r\n__ran.push('s5-crlf-raw')"),
+    ("s6-crlf-lf", "lf", "window.__ran=window.__ran||[];\r\n__ran.push('s6-crlf-lf')"),
+    ("s7-trimmed", "trim", "\n  window.__ran=window.__ran||[];__ran.push('s7-trimmed')  \n"),
+    ("s8-utf8", "sha256", "window.__ran=window.__ran||[];__ran.push('s8-utf8-\u{e9}')"),
+];
+
+fn hash_markup() -> (String, Vec<String>) {
+    let mut html = String::new();
+    let mut hashes = vec![];
+    for (_, alg, text) in HASH_SCRIPTS {
+        html.push_str(&format!("<script>{text}</script>"));
+        match alg {
+            "none" => {}
+            "raw" => hashes.push(csp_hash("sha256", text)),
+            "lf" => hashes.push(csp_hash("sha256", &text.replace("\r\n", "\n"))),
+            "trim" => hashes.push(csp_hash("sha256", text.trim())),
+            a => hashes.push(csp_hash(a, text)),
+        }
+    }
+    html.push_str(r#"<button id="hash-onclick" onclick="window.__ran=window.__ran||[];__ran.push('onclick')">x</button>"#);
+    (html, hashes)
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -109,6 +231,11 @@ struct Spec {
     args: Args,
     frame_cancel: bool,
     bridge: Option<char>,
+    surface: Surface,
+    unthrottle: bool,
+    style_policy: bool,
+    host_hidden: bool,
+    hold_activity: bool,
 }
 
 fn spec(name: &str) -> Spec {
@@ -129,6 +256,11 @@ fn spec(name: &str) -> Spec {
         args: Args::Stock,
         frame_cancel: false,
         bridge: None,
+        surface: Surface::Visible,
+        unthrottle: false,
+        style_policy: false,
+        host_hidden: false,
+        hold_activity: false,
     };
     let srcdoc = |app| Frame { app, sandbox: "allow-scripts", source: Source::Srcdoc };
     let scheme = |app| Frame { app, sandbox: "allow-scripts", source: Source::Scheme };
@@ -146,6 +278,48 @@ fn spec(name: &str) -> Spec {
         let apps = if two { vec![win("A", a), win("B", b)] } else { vec![win("A", a)] };
         Spec { bridge: Some(c), args: Args::Hosts, ..w2(group, layout, apps) }
     };
+    let labels = |c: char| match c {
+        'S' => "bs-a",
+        'C' => "bc-a",
+        _ => "bt-a",
+    };
+    match name {
+        "Y3C" | "Y3W" | "Y3CH" | "Y3WH" | "Z3C" | "Z3W" => {
+            let layout = if name.as_bytes()[2] == b'W' { Layout::Windows } else { Layout::Children };
+            let group = if name.starts_with('Y') { Group::Style } else { Group::Hashes };
+            let args = if name.ends_with('H') { Args::Hosts } else { Args::Stock };
+            return Spec { style_policy: group == Group::Style, args, ..w2(group, layout, vec![win("A", "app-a")]) };
+        }
+        "M3V" | "M3H" | "M3C" | "M3Z" => {
+            let layout = if matches!(name, "M3V" | "M3H") { Layout::Windows } else { Layout::Children };
+            let surface = match name {
+                "M3H" => Surface::Hidden,
+                "M3Z" => Surface::Zero,
+                _ => Surface::Visible,
+            };
+            let apps = ["m1-a", "m2-a", "m3-a", "m4-a"].into_iter().map(|l| win("A", l)).collect();
+            return Spec { surface, ..w2(Group::Memory, layout, apps) };
+        }
+        _ => {}
+    }
+    if let [b'V', b'3', c, m] = name.as_bytes() {
+        let c = *c as char;
+        let (layout, surface, unthrottle) = match m {
+            b'V' => (Layout::Windows, Surface::Visible, false),
+            b'H' | b'N' => (Layout::Windows, Surface::Hidden, false),
+            b'X' | b'A' => (Layout::Windows, Surface::Hidden, true),
+            b'C' => (Layout::Children, Surface::Visible, false),
+            b'Z' => (Layout::Children, Surface::Zero, false),
+            b'O' => (Layout::Children, Surface::Offscreen, false),
+            _ => (Layout::Children, Surface::HiddenChild, false),
+        };
+        let all_hidden = matches!(m, b'N' | b'A');
+        return Spec { bridge: Some(c), surface, unthrottle, host_hidden: all_hidden, hold_activity: *m == b'A', ..w2(Group::Surface, layout, vec![win("A", labels(c))]) };
+    }
+    if let [b'D', b'3', c] = name.as_bytes() {
+        let c = *c as char;
+        return Spec { bridge: Some(c), surface: Surface::Hidden, host_hidden: true, unthrottle: true, hold_activity: true, style_policy: true, ..w2(Group::Docs, Layout::Windows, vec![win("A", labels(c))]) };
+    }
     if let [p0, p1, c, l] = name.as_bytes() {
         let layout = if *l == b'W' { Layout::Windows } else { Layout::Children };
         let c = *c as char;
@@ -315,14 +489,24 @@ fn policy_text(policy: Policy, hash: &str, app: &str) -> Option<String> {
     }
 }
 
-fn wrapper_policy(wrapper: &str, document: &str, open: bool, bridge: Option<char>, app: &str) -> String {
-    let frames = match (open, bridge) {
-        (true, _) => "* isolation: http://isolation.localhost",
-        (false, Some('C')) if cfg!(feature = "iso") => "isolation: http://isolation.localhost",
-        _ => "'none'",
+fn isolation_source(probe: &Probe) -> Option<String> {
+    let inner = probe.inner.lock().unwrap();
+    let src = inner.events.get("host.isolation")?["data"]["report"]["src"].as_str()?.to_owned();
+    let url = tauri::Url::parse(&src).ok()?;
+    Some(if cfg!(windows) { url.origin().ascii_serialization() } else { format!("{}:", url.scheme()) })
+}
+
+fn wrapper_policy(wrapper: &str, documents: &[String], open: bool, bridge: Option<char>, app: &str, style: bool, iso: Option<String>) -> String {
+    let frames = match (open, bridge, iso) {
+        (true, _, Some(i)) => format!("* {i}"),
+        (true, _, None) => "* isolation: http://isolation.localhost".to_owned(),
+        (false, Some('C'), Some(i)) => i,
+        _ => "'none'".to_owned(),
     };
     let connect = if bridge == Some('S') { format!("; connect-src {}", own_origin(app)) } else { String::new() };
-    format!("default-src 'none'; script-src '{wrapper}' '{document}'; frame-src {frames}; child-src {frames}{connect}")
+    let docs: String = documents.iter().map(|h| format!(" '{h}'")).collect();
+    let styles = if style { format!("; {STYLE_SOURCES}") } else { String::new() };
+    format!("default-src 'none'; script-src '{wrapper}'{docs}; frame-src {frames}; child-src {frames}{connect}{styles}")
 }
 
 fn wrapper_html(cfg: &Value, app: &str) -> String {
@@ -373,12 +557,28 @@ fn bridge_answer<R: Runtime>(app: &AppHandle<R>, label: &str, via: &str, origin:
             probe.inner.lock().unwrap().host_replies.push(json!({ "label": label, "id": body["id"], "ms": ms }));
             json!({ "app": me, "op": op })
         }
+        "hcall" => json!({ "app": me, "op": op, "result": fixture_forward(body) }),
         "size" => {
             let n = body["replySize"].as_u64().unwrap_or(0) as usize;
             json!({ "app": me, "op": op, "len": len, "data": "b".repeat(n) })
         }
         _ => json!({ "app": me, "op": op, "n": body["n"] }),
     }
+}
+
+fn fixture_forward(body: &Value) -> Value {
+    use std::io::Read;
+    let Ok(addr) = std::env::var("PROBE_FIXTURE_ADDR") else { return json!({ "error": "no fixture endpoint" }) };
+    let payload = json!({ "method": body["method"], "args": body["args"] }).to_string();
+    let attempt = || -> std::io::Result<Value> {
+        let mut c = std::net::TcpStream::connect(&addr)?;
+        write!(c, "POST /rpc HTTP/1.1\r\nHost: {addr}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{payload}", payload.len())?;
+        let mut buf = String::new();
+        c.read_to_string(&mut buf)?;
+        let body = buf.split_once("\r\n\r\n").map(|(_, b)| b).unwrap_or("");
+        Ok(serde_json::from_str(body).unwrap_or_else(|_| json!({ "error": "bad fixture reply" })))
+    };
+    attempt().unwrap_or_else(|e| json!({ "error": e.to_string() }))
 }
 
 #[tauri::command]
@@ -436,6 +636,7 @@ fn fixture_cfg<R: Runtime>(app: &AppHandle<R>, probe: &Probe, fixture: &str, mod
         "nonce": probe.nonce,
         "leakedKey": app.invoke_key(),
         "ownBase": own_base(fixture),
+        "exits": std::env::var("PROBE_EXITS").ok(),
     });
     if let (Value::Object(c), Value::Object(e)) = (&mut cfg, extra) {
         c.extend(e);
@@ -444,12 +645,34 @@ fn fixture_cfg<R: Runtime>(app: &AppHandle<R>, probe: &Probe, fixture: &str, mod
 }
 
 fn fixture_html(cfg: &Value, csp_meta: Option<&str>, fixture: &str) -> String {
+    fixture_html_with(cfg, csp_meta, fixture, "")
+}
+
+fn style_markup() -> String {
+    format!(r#"<style>#st-el{{width:37px;height:5px;background:rgb(1,2,3)}}</style><div id="st-el"></div><div id="st-attr" style="width:41px;height:5px"></div><img id="st-img" src="{PNG_DATA}">"#)
+}
+
+fn author_doc(fcfg: &Value) -> (String, Vec<String>) {
+    let path = std::env::var("PROBE_DOC").expect("PROBE_DOC");
+    let html = std::fs::read_to_string(path).expect("read document");
+    let head = std::env::var("PROBE_DOC_HEAD").ok().and_then(|p| std::fs::read_to_string(p).ok()).unwrap_or_default();
+    let head = head.replace("__PROBE_CFG__", &fcfg.to_string().replace('<', "\\u003c"));
+    let at = after_head(&html);
+    let body = format!("{}{head}{}", &html[..at], &html[at..]);
+    let hashes: Vec<String> = inline_scripts(&body).iter().map(|t| csp_hash("sha256", t)).collect();
+    let srcs: String = hashes.iter().map(|h| format!(" '{h}'")).collect();
+    let meta = format!(r#"<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src{srcs}; {STYLE_SOURCES}">"#);
+    let at = after_head(&body);
+    (format!("{}{meta}{}", &body[..at], &body[at..]), hashes)
+}
+
+fn fixture_html_with(cfg: &Value, csp_meta: Option<&str>, fixture: &str, extra: &str) -> String {
     let cfg = cfg.to_string().replace('<', "\\u003c");
     let meta = csp_meta
         .map(|p| format!(r#"<meta http-equiv="Content-Security-Policy" content="{p}">"#))
         .unwrap_or_default();
     format!(
-        r#"<!doctype html><html><head><meta charset="utf-8">{meta}<title>fixture {fixture}</title></head><body><p id="fixture-secret">FIXTURE-{fixture}-SECRET</p><div id="probe-style"></div><script type="application/json" id="probe-cfg">{cfg}</script><script>{js}</script></body></html>"#,
+        r#"<!doctype html><html><head><meta charset="utf-8">{meta}<title>fixture {fixture}</title></head><body><p id="fixture-secret">FIXTURE-{fixture}-SECRET</p><div id="probe-style"></div>{extra}<script type="application/json" id="probe-cfg">{cfg}</script><script>{js}</script></body></html>"#,
         js = *FIXTURE_JS
     )
 }
@@ -506,6 +729,7 @@ fn probe_config(app: AppHandle, probe: State<'_, Probe>) -> Value {
         .collect();
     json!({
         "variant": probe.variant,
+        "pattern": if cfg!(feature = "iso") { "isolation" } else { "brownfield" },
         "group": format!("{:?}", s.group),
         "launch": probe.launch,
         "nonce": probe.nonce,
@@ -620,14 +844,26 @@ fn scheme_handler<R: Runtime>(
             "/wrap.html" => {
                 let route = query.strip_prefix("r=").unwrap_or("none").to_owned();
                 let phase = next_phase(&probe, fixture);
-                let fcfg = fixture_cfg(app, &probe, fixture, "frame", json!({ "route": route, "phase": phase, "bridge": s.bridge.map(String::from) }));
-                let fpolicy = policy_text(Policy::Base, &probe.hash, fixture);
-                let srcdoc = fixture_html(&fcfg, fpolicy.as_deref(), fixture);
+                let s1 = HASH_SCRIPTS[0].2;
+                let fcfg = fixture_cfg(app, &probe, fixture, "frame", json!({ "route": route, "phase": phase, "bridge": s.bridge.map(String::from), "s1": s1 }));
+                let (srcdoc, doc_hashes) = match s.group {
+                    Group::Docs => author_doc(&fcfg),
+                    Group::Hashes => {
+                        let (markup, mut hashes) = hash_markup();
+                        hashes.push(probe.hash.clone());
+                        let srcs: String = hashes.iter().map(|h| format!(" '{h}'")).collect();
+                        (fixture_html_with(&fcfg, Some(&format!("default-src 'none'; script-src{srcs}")), fixture, &markup), hashes)
+                    }
+                    Group::Style => (fixture_html_with(&fcfg, Some(&format!("default-src 'none'; script-src '{}'; {STYLE_SOURCES}", probe.hash)), fixture, &style_markup()), vec![probe.hash.clone()]),
+                    _ => (fixture_html(&fcfg, policy_text(Policy::Base, &probe.hash, fixture).as_deref(), fixture), vec![probe.hash.clone()]),
+                };
+                probe.note("docHashes", json!(doc_hashes));
                 let wcfg = json!({
                     "app": fixture, "group": format!("{:?}", s.group), "variant": probe.variant, "route": route, "phase": phase, "srcdoc": srcdoc, "sandbox": s.frame_sandbox,
                     "bridge": s.bridge.map(String::from), "bridgeUrl": format!("{}bridge", own_base(fixture)),
                 });
-                let wpolicy = wrapper_policy(&probe.wrap_hash, &probe.hash, s.frame_src_open, s.bridge, fixture);
+                let wpolicy = wrapper_policy(&probe.wrap_hash, &doc_hashes, s.frame_src_open, s.bridge, fixture, s.style_policy, isolation_source(&probe));
+                probe.note("wrapperPolicy", json!(wpolicy));
                 respond(200, "text/html; charset=utf-8", wrapper_html(&wcfg, fixture).into_bytes(), Some(wpolicy))
             }
             "/bridge" => {
@@ -656,6 +892,7 @@ fn browser_args(s: &Spec) -> Option<String> {
         format!(r#"--proxy-server=http://127.0.0.1:{port} --proxy-bypass-list="<-loopback>;*.localhost""#)
     };
     let extra = match s.args {
+        Args::Stock if s.unthrottle => UNTHROTTLE_ARGS.to_owned(),
         Args::Stock => return s.webrtc_arg.then(|| format!("{DEFAULT_ARGS} {WEBRTC_ARG}")),
         Args::Features => return Some(FEATURE_ARGS.to_owned()),
         Args::Hosts => HOST_RULES.to_owned(),
@@ -723,6 +960,71 @@ fn no_peer_config(probe: &Probe) -> objc2::rc::Retained<objc2_web_kit::WKWebView
     }
 }
 
+#[cfg(target_os = "macos")]
+fn unthrottled_config(probe: &Probe) -> objc2::rc::Retained<objc2_web_kit::WKWebViewConfiguration> {
+    let mtm = objc2::MainThreadMarker::new().expect("main thread");
+    unsafe {
+        let config = objc2_web_kit::WKWebViewConfiguration::new(mtm);
+        let prefs = config.preferences();
+        let before = prefs.inactiveSchedulingPolicy().0;
+        prefs.setInactiveSchedulingPolicy(objc2_web_kit::WKInactiveSchedulingPolicy::None);
+        let after = prefs.inactiveSchedulingPolicy().0;
+        probe.note("inactiveSchedulingPolicy", json!({ "before": before, "after": after, "values": "0 suspend, 1 throttle, 2 none" }));
+        config
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn hold_activity() {
+    use objc2::{class, msg_send, rc::Retained, runtime::AnyObject};
+    unsafe {
+        let info: Retained<AnyObject> = msg_send![class!(NSProcessInfo), processInfo];
+        let reason: Retained<AnyObject> = msg_send![class!(NSString), stringWithUTF8String: c"probe".as_ptr()];
+        let options: u64 = 0x00FF_FFFF | 0xFF_0000_0000;
+        let token: Retained<AnyObject> = msg_send![&*info, beginActivityWithOptions: options, reason: &*reason];
+        std::mem::forget(token);
+    }
+}
+
+fn hide_all() -> bool {
+    std::env::var("PROBE_HIDE_ALL").is_ok_and(|v| v == "1")
+}
+
+fn processes() -> Value {
+    let (cmd, args): (&str, Vec<&str>) = if cfg!(windows) {
+        ("powershell", vec!["-NoProfile", "-Command", "Get-CimInstance Win32_Process -Filter \"Name='msedgewebview2.exe'\" | ForEach-Object { \"$($_.ProcessId) $([int64]($_.WorkingSetSize / 1024)) $($_.CommandLine)\" }"])
+    } else if cfg!(target_os = "macos") {
+        ("ps", vec!["-axo", "pid=,rss=,comm="])
+    } else {
+        ("ps", vec!["-eo", "pid=,rss=,args="])
+    };
+    let Ok(out) = std::process::Command::new(cmd).args(&args).output() else { return json!({ "error": "process listing failed" }) };
+    let text = String::from_utf8_lossy(&out.stdout).to_string();
+    let mut rows = vec![];
+    for line in text.lines() {
+        let mut it = line.split_whitespace();
+        let (Some(pid), Some(rss)) = (it.next(), it.next()) else { continue };
+        let rest: String = it.collect::<Vec<_>>().join(" ");
+        let kind = if cfg!(windows) {
+            rest.split("--type=").nth(1).map(|t| t.split(' ').next().unwrap_or("").to_owned()).unwrap_or_else(|| "browser".into())
+        } else if let Some(k) = ["WebKitWebProcess", "WebKitNetworkProcess", "WebKitGPUProcess", "com.apple.WebKit.WebContent", "com.apple.WebKit.Networking", "com.apple.WebKit.GPU"].iter().find(|k| rest.contains(*k)) {
+            (*k).to_owned()
+        } else {
+            continue;
+        };
+        rows.push(json!({ "pid": pid.parse::<u64>().unwrap_or(0), "rssKiB": rss.parse::<u64>().unwrap_or(0), "kind": kind }));
+    }
+    let mut by_kind: Map<String, Value> = Map::new();
+    for r in &rows {
+        let k = r["kind"].as_str().unwrap_or("").to_owned();
+        let e = by_kind.entry(k).or_insert(json!({ "count": 0, "rssKiB": 0 }));
+        e["count"] = json!(e["count"].as_u64().unwrap_or(0) + 1);
+        e["rssKiB"] = json!(e["rssKiB"].as_u64().unwrap_or(0) + r["rssKiB"].as_u64().unwrap_or(0));
+    }
+    let total: u64 = rows.iter().map(|r| r["rssKiB"].as_u64().unwrap_or(0)).sum();
+    json!({ "method": if cfg!(windows) { "Win32_Process WorkingSetSize" } else { "ps rss" }, "count": rows.len(), "totalKiB": total, "byKind": by_kind, "rows": rows })
+}
+
 macro_rules! configure {
     ($builder:expr, $app:expr, $spec:expr, $label:expr, $own:expr) => {{
         let mut b = $builder;
@@ -730,12 +1032,19 @@ macro_rules! configure {
         if s.init_all_frames {
             b = b.initialization_script_for_all_frames(INIT_SCRIPT);
         }
+        if s.group == Group::Docs {
+            b = b.initialization_script_for_all_frames(DOCS_INIT);
+        }
         if let Some(args) = browser_args(s) {
             b = b.additional_browser_args(&args);
         }
         #[cfg(target_os = "macos")]
         if s.no_peer {
             b = b.with_webview_configuration(no_peer_config(&$app.state::<Probe>()));
+        }
+        #[cfg(target_os = "macos")]
+        if s.unthrottle || hide_all() {
+            b = b.with_webview_configuration(unthrottled_config(&$app.state::<Probe>()));
         }
         if s.group == Group::Nav || s.wrap {
             let guard = s.nav_guard;
@@ -788,7 +1097,14 @@ fn app_url(s: &Spec, a: &App) -> WebviewUrl {
 }
 
 fn open_apps<R: Runtime>(app: &AppHandle<R>, s: &Spec) {
-    for (i, a) in s.apps.iter().enumerate() {
+    for i in 0..s.apps.len() {
+        open_app(app, s, i);
+    }
+}
+
+fn open_app<R: Runtime>(app: &AppHandle<R>, s: &Spec, i: usize) {
+    {
+        let a = &s.apps[i];
         let url = app_url(s, a);
         let label = a.label;
         let own = Some(own_base(a.scheme_app));
@@ -796,9 +1112,11 @@ fn open_apps<R: Runtime>(app: &AppHandle<R>, s: &Spec) {
         let title_label = label.to_string();
         match s.layout {
             Layout::Windows => {
+                let (w, h) = if s.group == Group::Docs { (1280.0, 800.0) } else { (640.0, 480.0) };
                 let builder = WebviewWindowBuilder::new(app, label, url)
                     .title(format!("fixture {}", a.app))
-                    .inner_size(640.0, 480.0)
+                    .visible(s.surface == Surface::Visible && !hide_all())
+                    .inner_size(w, h)
                     .position(700.0 + 40.0 * i as f64, 40.0 + 40.0 * i as f64)
                     .on_document_title_changed(move |_, title| on_title_app(&handle, &title_label, &title));
                 let window = configure!(builder, app, s, label, own).build().expect("fixture window");
@@ -825,13 +1143,19 @@ fn open_apps<R: Runtime>(app: &AppHandle<R>, s: &Spec) {
 fn add_child<R: Runtime>(app: &AppHandle<R>, s: &Spec, label: &str, url: WebviewUrl, i: usize, own: Option<String>, on: impl Fn(String) + Send + 'static) {
     let shell = app.get_window("shell").expect("shell window");
     let builder = tauri::webview::WebviewBuilder::new(label, url).on_document_title_changed(move |_, t| on(t));
-    shell
-        .add_child(
-            configure!(builder, app, s, label, own),
-            tauri::LogicalPosition::new(600.0, 350.0 * i as f64),
-            tauri::LogicalSize::new(600.0, 350.0),
-        )
+    let (x, y, w, h) = match s.surface {
+        Surface::Zero => (600.0, 0.0, 0.0, 0.0),
+        Surface::Offscreen => (-5000.0, -5000.0, 600.0, 350.0),
+        _ if s.group == Group::Memory => (600.0 + 20.0 * i as f64, 20.0 * i as f64, 600.0, 350.0),
+        _ => (600.0, 350.0 * i as f64, 600.0, 350.0),
+    };
+    let child = shell
+        .add_child(configure!(builder, app, s, label, own), tauri::LogicalPosition::new(x, y), tauri::LogicalSize::new(w, h))
         .expect("child webview");
+    if s.surface == Surface::HiddenChild {
+        let r = child.hide().map(|_| "ok".to_owned()).unwrap_or_else(|e| format!("error {e}"));
+        app.state::<Probe>().note("childHide", json!(r));
+    }
 }
 
 #[cfg(not(feature = "v4"))]
@@ -843,6 +1167,7 @@ fn add_child<R: Runtime>(_: &AppHandle<R>, _: &Spec, _: &str, _: WebviewUrl, _: 
 fn open_host_child<R: Runtime>(app: &AppHandle<R>, s: &Spec) {
     let shell = tauri::window::WindowBuilder::new(app, "shell")
         .title("webview policy probe")
+        .visible(!s.host_hidden && !hide_all())
         .inner_size(1200.0, 700.0)
         .build()
         .expect("shell window");
@@ -865,6 +1190,7 @@ fn open_host<R: Runtime>(app: &AppHandle<R>, s: &Spec) -> tauri::Result<()> {
     }
     let builder = WebviewWindowBuilder::new(app, "main", WebviewUrl::App("index.html".into()))
         .title("webview policy probe")
+        .visible(!s.host_hidden && !hide_all())
         .inner_size(1000.0, 700.0)
         .position(20.0, 20.0);
     let mut builder = if let Some(args) = browser_args(s) { builder.additional_browser_args(&args) } else { builder };
@@ -952,13 +1278,27 @@ fn control<R: Runtime>(handle: AppHandle<R>) {
         }
         std::thread::sleep(Duration::from_millis(100));
     }
-    if !s.apps.is_empty() {
+    if cfg!(feature = "iso") {
+        let found = wait_for(&probe, &["host.isolation".to_owned()], Duration::from_secs(10));
+        probe.note("isolationSource", json!({ "found": found, "source": isolation_source(&probe) }));
+    }
+    if !s.apps.is_empty() && s.group != Group::Memory {
         let h = handle.clone();
         let s2 = spec(&probe.variant);
         handle.run_on_main_thread(move || open_apps(&h, &s2)).expect("main thread");
     }
     let complete = match s.group {
-        Group::Rtc | Group::Ipc | Group::Assets => {
+        Group::Surface => surface(&handle, &probe, &s),
+        Group::Memory => memory(&handle, &probe, &s),
+        Group::Docs => {
+            std::thread::sleep(Duration::from_secs(8));
+            let sent = eval_on(&handle, s.apps[0].label, "window.__probeDocsReport()");
+            probe.note("docsReport", json!({ "sent": sent, "atMs": probe.ms() }));
+            let ok = wait_for(&probe, &app_keys(&s, "done"), Duration::from_secs(30));
+            std::thread::sleep(Duration::from_millis(1500));
+            ok
+        }
+        Group::Rtc | Group::Ipc | Group::Assets | Group::Style | Group::Hashes => {
             let mut keys = app_keys(&s, "done");
             if s.group == Group::Ipc {
                 keys.push("host.hostcall".into());
@@ -1018,6 +1358,60 @@ fn control<R: Runtime>(handle: AppHandle<R>) {
         }
     };
     finish(&handle, complete);
+}
+
+fn close_container<R: Runtime>(handle: &AppHandle<R>, s: &Spec, label: &str) -> Value {
+    if s.layout == Layout::Windows {
+        let r = handle.get_webview_window(label).map(|w| w.destroy().map(|_| "ok".to_owned()).unwrap_or_else(|e| format!("error {e}")));
+        json!({ "action": "window destroy", "call": r })
+    } else {
+        let r = handle.get_webview(label).map(|w| w.close().map(|_| "ok".to_owned()).unwrap_or_else(|e| format!("error {e}")));
+        json!({ "action": "child webview close", "call": r })
+    }
+}
+
+fn surface<R: Runtime>(handle: &AppHandle<R>, probe: &Probe, s: &Spec) -> bool {
+    let label = s.apps[0].label;
+    let ok = wait_for(probe, &app_keys(s, "ready"), Duration::from_secs(40));
+    let t_ready = probe.ms();
+    probe.note("surfaceMode", json!({ "surface": format!("{:?}", s.surface), "unthrottle": s.unthrottle, "readyMs": t_ready, "ready": ok }));
+    std::thread::sleep(Duration::from_secs(30));
+    let at = probe.ms();
+    let sent = eval_on(handle, label, &format!("window.__bridgeEvent({})", json!({ "from": "host", "atMs": at })));
+    probe.note("event.A", json!({ "atMs": at, "sent": sent }));
+    let done = wait_for(probe, &app_keys(s, "done"), Duration::from_secs(90));
+    let t_done = probe.ms();
+    let before = processes();
+    let close = close_container(handle, s, label);
+    std::thread::sleep(Duration::from_secs(5));
+    let after = processes();
+    let beats = probe.inner.lock().unwrap().doc_beats.get("A").cloned().unwrap_or_default();
+    let in_window = beats.iter().filter(|&&b| b > t_ready && b <= t_ready + 60_000).count();
+    let gaps: Vec<u64> = beats.windows(2).map(|w| w[1] - w[0]).collect();
+    probe.note("surface", json!({ "beatsIn60s": in_window, "beatsTotal": beats.len(), "maxGapMs": gaps.iter().max(), "doneMs": t_done, "done": done, "close": close, "before": before, "after": after }));
+    ok && done
+}
+
+fn memory<R: Runtime>(handle: &AppHandle<R>, probe: &Probe, s: &Spec) -> bool {
+    let open = |i: usize| {
+        let h = handle.clone();
+        let variant = probe.variant.clone();
+        handle.run_on_main_thread(move || open_app(&h, &spec(&variant), i)).expect("main thread");
+    };
+    std::thread::sleep(Duration::from_secs(10));
+    let zero = processes();
+    open(0);
+    let ok = wait_for(probe, &app_keys(s, "ready"), Duration::from_secs(40));
+    std::thread::sleep(Duration::from_secs(10));
+    let one = processes();
+    for i in 1..s.apps.len() {
+        open(i);
+    }
+    std::thread::sleep(Duration::from_secs(14));
+    let four = processes();
+    let loaded = probe.inner.lock().unwrap().events.get("A.ready").cloned();
+    probe.note("memory", json!({ "surface": format!("{:?}", s.surface), "layout": if s.layout == Layout::Windows { "windows" } else { "children" }, "zero": zero, "one": one, "four": four, "firstReady": loaded.is_some() }));
+    ok
 }
 
 fn hang<R: Runtime>(handle: &AppHandle<R>, probe: &Probe, s: &Spec) -> bool {
@@ -1127,6 +1521,10 @@ fn main() {
     let dir = PathBuf::from(std::env::var("PROBE_DIR").expect("PROBE_DIR"));
     std::fs::create_dir_all(&dir).expect("probe dir");
     trace::install(dir.join("trace.jsonl"));
+    #[cfg(target_os = "macos")]
+    if hide_all() || spec(&variant_name).hold_activity {
+        hold_activity();
+    }
     let hash = format!("sha256-{}", base64::engine::general_purpose::STANDARD.encode(Sha256::digest(FIXTURE_JS.as_bytes())));
     let stun_ports: Vec<String> = std::env::var("PROBE_STUN").expect("PROBE_STUN").split(',').map(str::to_owned).collect();
     let stun: Map<String, Value> = WEBRTC_ROUTES.iter().zip(stun_ports.iter()).map(|(r, p)| (r.to_string(), json!(p))).collect();

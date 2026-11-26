@@ -367,6 +367,174 @@
     await send('done', R)
   }
 
+  async function style() {
+    const R = { identity, render: {}, exits: {} }
+    await wait(300)
+    const w = (id) => attempt(() => getComputedStyle(document.getElementById(id)).width)
+    R.render.styleElement = w('st-el')
+    R.render.styleAttribute = w('st-attr')
+    const img = document.getElementById('st-img')
+    R.render.dataImage = attempt(() => `${img.complete} ${img.naturalWidth}x${img.naturalHeight}`)
+    const cssom = document.createElement('div')
+    cssom.style.width = '43px'
+    document.body.appendChild(cssom)
+    R.render.cssom = attempt(() => getComputedStyle(cssom).width)
+    const url = (kind, dns) => {
+      const base = dns ? cfg.sink.replace('127.0.0.1', `${kind}-${cfg.variant.toLowerCase()}.wp.test`) : cfg.sink
+      return `${base}/e/${cfg.variant}/${cfg.app}/css-${kind}${dns ? '-dns' : ''}`
+    }
+    const box = (css) => {
+      const d = document.createElement('div')
+      d.setAttribute('style', `width:20px;height:20px;${css}`)
+      d.textContent = 'x'
+      document.body.appendChild(d)
+      return d
+    }
+    const sheet = (css) => {
+      const st = document.createElement('style')
+      st.textContent = css
+      document.head.appendChild(st)
+    }
+    const svg = (u) => `data:image/svg+xml,${encodeURIComponent(`<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" width="10" height="10"><image href="${u}" xlink:href="${u}" width="10" height="10"/><style>@import url(${u}-import);</style></svg>`)}`
+    const exits = {
+      bg: (u) => box(`background-image:url(${u})`),
+      bgsheet: (u) => (sheet(`.bgs-${cfg.app}{background:url(${u})}`), (box('').className = `bgs-${cfg.app}`)),
+      import: (u) => sheet(`@import url(${u});`),
+      font: (u) => (sheet(`@font-face{font-family:pf${u.length};src:url(${u})}`), box(`font-family:pf${u.length}`)),
+      imageset: (u) => box(`background-image:image-set(url(${u}) 1x)`),
+      img: (u) => {
+        const i = new Image()
+        i.src = u
+        document.body.appendChild(i)
+      },
+      srcset: (u) => {
+        const i = document.createElement('img')
+        i.srcset = `${u} 1x`
+        document.body.appendChild(i)
+      },
+      picture: (u) => {
+        const p = document.createElement('picture')
+        p.innerHTML = `<source srcset="${u}"><img src="${PNG}">`
+        document.body.appendChild(p)
+      },
+      link: (u) => {
+        const l = document.createElement('link')
+        l.rel = 'stylesheet'
+        l.href = u
+        document.head.appendChild(l)
+      },
+      preload: (u) => {
+        const l = document.createElement('link')
+        l.rel = 'preload'
+        l.as = 'image'
+        l.href = u
+        document.head.appendChild(l)
+      },
+      svgimg: (u) => {
+        const i = new Image()
+        i.src = svg(u)
+        document.body.appendChild(i)
+      },
+      svgbg: (u) => box(`background-image:url("${svg(u)}")`),
+      cursor: (u) => box(`cursor:url(${u}),auto`),
+      liststyle: (u) => {
+        const ul = document.createElement('ul')
+        ul.setAttribute('style', `list-style-image:url(${u})`)
+        ul.innerHTML = '<li>x</li>'
+        document.body.appendChild(ul)
+      },
+      border: (u) => box(`border:4px solid;border-image:url(${u}) 30 round`),
+      mask: (u) => box(`mask-image:url(${u});-webkit-mask-image:url(${u})`),
+      content: (u) => (sheet(`.ct-${cfg.app}::before{content:url(${u})}`), (box('').className = `ct-${cfg.app}`)),
+      video: (u) => {
+        const v = document.createElement('video')
+        v.poster = u
+        document.body.appendChild(v)
+      },
+      input: (u) => {
+        const i = document.createElement('input')
+        i.type = 'image'
+        i.src = u
+        document.body.appendChild(i)
+      },
+    }
+    const PNG = document.getElementById('st-img').src
+    const only = cfg.exits ? cfg.exits.split(',') : null
+    for (const [kind, run] of Object.entries(exits).filter(([k]) => !only || only.includes(k))) {
+      R.exits[kind] = attempt(() => (run(url(kind, false)), 'tried'))
+      R.exits[`${kind}-dns`] = attempt(() => (run(url(kind, true)), 'tried'))
+    }
+    await wait(4000)
+    R.violations = violations.slice(0, 80)
+    await send('done', R)
+  }
+
+  async function hashes() {
+    window.__ran = window.__ran || []
+    const R = { identity }
+    const before = window.__ran.slice()
+    const dyn = (text) => {
+      const sc = document.createElement('script')
+      sc.textContent = text
+      document.body.appendChild(sc)
+    }
+    R.runtime = {
+      createNew: attempt(() => (dyn("window.__ran.push('dyn-new')"), 'inserted')),
+      createHashed: attempt(() => (dyn(cfg.s1), 'inserted')),
+      eval: attempt(() => eval("window.__ran.push('eval')")),
+      function: attempt(() => new Function("window.__ran.push('function')")()),
+      timeoutString: attempt(() => (setTimeout("window.__ran.push('timeout-string')", 0), 'scheduled')),
+      onclick: attempt(() => (document.getElementById('hash-onclick').click(), 'clicked')),
+      javascriptUrl: attempt(() => {
+        const a = document.createElement('a')
+        a.href = "javascript:window.__ran.push('javascript-url')"
+        document.body.appendChild(a)
+        a.click()
+        return 'clicked'
+      }),
+    }
+    await wait(800)
+    R.ranAtStart = before
+    R.ran = window.__ran.slice()
+    R.violations = violations.slice(0, 40)
+    await send('done', R)
+  }
+
+  async function surface() {
+    const { request, events } = bridgeCalls()
+    const t0 = performance.now()
+    const R = { identity, visibility: [] }
+    await send('ready', { visibility: document.visibilityState, hidden: document.hidden })
+    let ticks = 0
+    let rafs = 0
+    const tick = setInterval(() => {
+      ticks++
+      parent.postMessage({ probe: 1, app: cfg.app, kind: 'hb' }, '*')
+      if (ticks % 10 === 0) R.visibility.push(`${ticks}:${document.visibilityState}`)
+    }, 1000)
+    const raf = () => {
+      rafs++
+      requestAnimationFrame(raf)
+    }
+    requestAnimationFrame(raf)
+    await wait(1000)
+    R.first = await request({ op: 'ping', tag: 'surface-first', n: 1 }, 10000)
+    const end = Date.now() + 59000
+    while (Date.now() < end) await wait(500)
+    clearInterval(tick)
+    R.ticks = ticks
+    R.rafs = rafs
+    R.elapsedMs = Math.round(performance.now() - t0)
+    R.last = await request({ op: 'ping', tag: 'surface-last', n: 2 }, 10000)
+    R.events = events.map((e) => ({ latencyMs: e.gotMs - e.atMs }))
+    R.visibilityEnd = document.visibilityState
+    await send('done', R)
+  }
+
+  async function idle() {
+    await send('ready', { identity })
+  }
+
   async function hang() {
     if (cfg.bridge) bridgeCalls()
     let beat = 0
@@ -450,7 +618,7 @@
     document.title = `NAV|${route}|${r.ok ? 'ok' : r.error}`
   }
 
-  const groups = { Rtc: rtc, Ipc: ipc, Assets: assets, Storage: storage, Hang: hang, Nav: nav, Bridge: bridge }
+  const groups = { Rtc: rtc, Ipc: ipc, Assets: assets, Storage: storage, Hang: hang, Nav: nav, Bridge: bridge, Style: style, Hashes: hashes, Surface: surface, Memory: idle }
   if (cfg.mode === 'nested') return nested()
   try {
     await groups[cfg.group]()
