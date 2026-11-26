@@ -1,0 +1,5 @@
+/node_modules/
+/bin/
+/raw/
+/__pycache__/
+/test262.json
