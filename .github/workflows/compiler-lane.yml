@@ -1,0 +1,44 @@
+name: compiler-lane
+on:
+  workflow_dispatch:
+  push:
+    branches: [probe/compiler-lane]
+    paths:
+      - ".github/workflows/compiler-lane.yml"
+      - "compiler-lane/**"
+      - "!compiler-lane/RESULT.md"
+permissions:
+  contents: read
+concurrency:
+  group: compiler-lane-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  check:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, windows-2025, macos-15]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 12
+    defaults:
+      run:
+        working-directory: compiler-lane
+        shell: bash
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6
+        with:
+          bun-version: 1.4.3
+      - run: bun install --frozen-lockfile --ignore-scripts
+      - if: runner.os != 'Windows'
+        run: python3 probe.py results/probe.json
+      - if: runner.os == 'Windows'
+        run: python probe.py results/probe.json
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        if: always()
+        with:
+          name: compiler-lane-${{ matrix.os }}
+          path: compiler-lane/results/probe.json
+          if-no-files-found: error

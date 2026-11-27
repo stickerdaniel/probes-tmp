@@ -1,0 +1,17 @@
+{
+  "name": "compiler-lane-probe",
+  "private": true,
+  "type": "module",
+  "packageManager": "bun@1.4.3",
+  "scripts": {
+    "typecheck": "tsc"
+  },
+  "dependencies": {
+    "effect": "4.1.5"
+  },
+  "devDependencies": {
+    "@effect/language-service": "0.87.5",
+    "@types/bun": "1.4.3",
+    "typescript": "6.0.3"
+  }
+}
