@@ -28,7 +28,7 @@ assert.ok(statSync("dist/index.html").isFile());
 run(process.execPath, "x", "--no-install", "tauri", "icon", "fixtures/icon.png");
 run(process.execPath, "x", "--no-install", "tauri", "build", "--no-sign", "--bundles", target, "--", "--locked");
 
-const build = join("src-tauri", "target", "release", "bundle", target);
+const build = join("src-tauri", "target", "release", "bundle", target === "app" ? "macos" : target);
 const extension = { app: ".app", deb: ".deb", nsis: "-setup.exe" }[target];
 const packages = readdirSync(build).filter((name) => name.endsWith(extension));
 assert.equal(packages.length, 1, "Expected one package");

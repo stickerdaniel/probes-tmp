@@ -31,11 +31,15 @@ async function command(args: string[]) {
   assert.equal(await child.exited, 0, args[0]);
 }
 
-function open(url: string, forceNew = false) {
+function open(url: string, mode: "cold" | "warm" | "second") {
   if (mac) {
-    const environment = ["--env", `ROUTEPROBE_SESSION=${marker}`];
-    if (position) environment.push("--env", `ROUTEPROBE_POSITION=${position}`);
-    return command(["open", "-g", "-a", bundle, ...environment, ...(forceNew ? ["-n", "--args"] : []), url]);
+    const args = ["open", "-g", "-a", bundle];
+    if (mode !== "warm") {
+      args.push("-n", "--env", `ROUTEPROBE_SESSION=${marker}`);
+      if (position) args.push("--env", `ROUTEPROBE_POSITION=${position}`);
+    }
+    if (mode === "second") args.push("--args");
+    return command([...args, url]);
   }
   if (process.platform === "win32") return command(["rundll32.exe", "url.dll,FileProtocolHandler", url]);
   return command(["xdg-open", url]);
@@ -113,7 +117,7 @@ async function session(variant: Variant) {
   }
 
   try {
-    await open(cold.url);
+    await open(cold.url, "cold");
     if (variant === "entry-404") {
       const blank = await row("cold");
       check(blank, "fail");
@@ -125,13 +129,13 @@ async function session(variant: Variant) {
     check(first, "pass");
     assert.deepEqual(read(output).filter((record) => record.kind === "asset" && record.failed), []);
 
-    await open(warm.url);
+    await open(warm.url, "warm");
     if (mac) {
       const system = await waitFor(output, (records) => records.find((record) => record.kind === "system-link"));
       check(system, "pass");
       assert.equal(system.pid, first.pid);
       assert.equal(read(output).filter((record) => record.kind === "process").length, 1);
-      await open(reopened.url, true);
+      await open(reopened.url, "second");
     }
 
     const second = await waitFor(output, (records) => records.find((record) => record.kind === "process" && record.pid !== first.pid));
@@ -206,6 +210,9 @@ try {
   }
 } finally {
   rmSync(marker);
-  if (mac) await command([registration, "-u", bundle]);
+  if (mac) {
+    await command([registration, "-u", bundle]);
+    console.log("Unregistered", bundle);
+  }
 }
 process.exitCode = failures ? 1 : 0;
