@@ -1,0 +1,17 @@
+{
+  "productName": "routeprobe",
+  "version": "0.1.0",
+  "identifier": "dev.probe.routing",
+  "build": { "frontendDist": "../dist" },
+  "app": { "windows": [] },
+  "bundle": {
+    "active": true,
+    "targets": ["app", "deb", "nsis"],
+    "icon": ["icons/icon.png", "icons/icon.ico", "icons/icon.icns"],
+    "linux": { "deb": { "desktopTemplate": "routeprobe.desktop" } },
+    "windows": { "nsis": { "installMode": "currentUser" } }
+  },
+  "plugins": {
+    "deep-link": { "desktop": { "schemes": ["routeprobe"] } }
+  }
+}

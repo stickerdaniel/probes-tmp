@@ -1,0 +1,14 @@
+{
+  "name": "routeprobe",
+  "private": true,
+  "type": "module",
+  "devDependencies": {
+    "@sveltejs/adapter-static": "4.0.1",
+    "@sveltejs/kit": "3.4.0",
+    "@sveltejs/vite-plugin-svelte": "7.3.2",
+    "@tauri-apps/api": "2.12.5",
+    "@tauri-apps/cli": "2.12.6",
+    "svelte": "5.57.3",
+    "vite": "8.3.8"
+  }
+}

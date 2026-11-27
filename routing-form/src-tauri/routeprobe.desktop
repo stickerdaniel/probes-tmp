@@ -1,0 +1,7 @@
+[Desktop Entry]
+Type=Application
+Name={{name}}
+Exec={{exec}} %u
+Icon={{icon}}
+Terminal=false
+MimeType={{mime_type}};

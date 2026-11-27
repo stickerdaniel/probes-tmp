@@ -1,18 +1,94 @@
 name: runners
 on:
   workflow_dispatch:
+  push:
+    branches: [probe/routing-form]
+    paths-ignore: [routing-form/RESULT.md]
 permissions:
   contents: read
+concurrency:
+  group: routing-form-${{ github.ref }}
+  cancel-in-progress: true
 jobs:
-  info:
+  routing:
     strategy:
       fail-fast: false
       matrix:
         os: [ubuntu-24.04, windows-2025, macos-15]
+        form: [plain, kit]
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 5
+    timeout-minutes: 25
+    defaults:
+      run:
+        working-directory: routing-form
+        shell: bash
     steps:
-      - shell: bash
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6
+        with:
+          bun-version: 1.4.3
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24.22.2
+      - run: rustup toolchain install 1.99.1 --profile minimal --no-self-update && rustup default 1.99.1
+      - name: Linux dependencies
+        if: runner.os == 'Linux'
         run: |
-          uname -a
-          echo "$RUNNER_OS $RUNNER_ARCH $ImageOS $ImageVersion"
+          apt_options=(-o Acquire::Retries=2 -o Acquire::http::Timeout=25 -o Acquire::https::Timeout=25)
+          if [[ -f /etc/apt/sources.list.d/ubuntu.sources ]]; then
+            apt_options+=(-o Dir::Etc::sourcelist=/etc/apt/sources.list.d/ubuntu.sources -o Dir::Etc::sourceparts=-)
+          fi
+          sudo apt-get "${apt_options[@]}" update
+          sudo apt-get "${apt_options[@]}" install -y --no-install-recommends libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev xvfb xauth dbus-x11
+      - uses: Swatinem/rust-cache@2201cc584a476d1b508be977bbe4b7d1c7a52e9c
+        with:
+          workspaces: routing-form/src-tauri -> target
+          cache-on-failure: true
+      - run: bun install --frozen-lockfile --ignore-scripts --registry https://registry.npmjs.org
+      - name: Record platform and package
+        run: |
+          mkdir -p results
+          uname -a > results/platform.log
+          echo "$RUNNER_OS $RUNNER_ARCH $ImageOS $ImageVersion" >> results/platform.log
+          bun package.ts ${{ matrix.form }}
+      - name: Exercise installed Linux package
+        if: runner.os == 'Linux'
+        run: |
+          sudo dpkg -i src-tauri/target/release/bundle/deb/*.deb
+          xdg-mime default routeprobe.desktop x-scheme-handler/routeprobe
+          XDG_CURRENT_DESKTOP=GNOME dbus-run-session -- xvfb-run -a bun run.ts /usr/bin/routeprobe results/probe
+      - name: Exercise installed Windows package
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $installer = Get-ChildItem src-tauri/target/release/bundle/nsis/*-setup.exe | Select-Object -First 1
+          $install = Start-Process -FilePath $installer.FullName -ArgumentList '/S' -Wait -PassThru
+          if ($install.ExitCode -ne 0) { exit $install.ExitCode }
+          bun run.ts "$env:LOCALAPPDATA/routeprobe/routeprobe.exe" results/probe
+          exit $LASTEXITCODE
+      - name: Exercise macOS app
+        if: runner.os == 'macOS'
+        run: bun run.ts src-tauri/target/release/bundle/macos/routeprobe.app results/probe
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        if: always()
+        with:
+          name: routing-${{ matrix.os }}-${{ matrix.form }}
+          path: |
+            routing-form/results/**/*.log
+            routing-form/results/**/*.json
+            routing-form/results/**/*.jsonl
+          if-no-files-found: warn
+      - name: Archive macOS application
+        if: always() && runner.os == 'macOS'
+        run: |
+          if [[ -d src-tauri/target/release/bundle/macos/routeprobe.app ]]; then
+            ditto -c -k --keepParent src-tauri/target/release/bundle/macos/routeprobe.app results/routeprobe.zip
+          fi
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        if: always() && runner.os == 'macOS'
+        with:
+          name: app-${{ matrix.os }}-${{ matrix.form }}
+          path: routing-form/results/routeprobe.zip
+          if-no-files-found: warn
